@@ -2,8 +2,8 @@
 
 import logging
 from typing import List
-from .base import CollectorBase
-from ..models.artifacts import SecurityEvent
+from ..base import CollectorBase
+from ...models.artifacts import SecurityEvent
 
 logger = logging.getLogger(__name__)
 

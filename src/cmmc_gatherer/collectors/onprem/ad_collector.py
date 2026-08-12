@@ -2,8 +2,8 @@
 
 import logging
 from typing import List, Optional
-from .base import CollectorBase
-from ..models.artifacts import ADObject
+from ..base import CollectorBase
+from ...models.artifacts import ADObject
 
 logger = logging.getLogger(__name__)
 

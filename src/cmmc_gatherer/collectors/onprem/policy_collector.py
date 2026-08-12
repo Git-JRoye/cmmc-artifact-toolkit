@@ -2,8 +2,8 @@
 
 import logging
 from typing import List, Optional
-from .base import CollectorBase
-from ..models.artifacts import Policy
+from ..base import CollectorBase
+from ...models.artifacts import Policy
 
 logger = logging.getLogger(__name__)
 
