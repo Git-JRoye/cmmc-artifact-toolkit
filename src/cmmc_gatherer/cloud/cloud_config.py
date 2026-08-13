@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional
 
+from ..onprem.domain_config import DomainConfig
+
 
 class NationalCloud(str, Enum):
     COMMERCIAL = "commercial"
@@ -75,6 +77,8 @@ class TenantProfile:
     tenant_id: Optional[str] = None       # Entra directory (tenant) GUID
     client_id: Optional[str] = None       # app registration (application) id
     secret_ref: Optional[str] = None      # key into your vault/secret store
+
+    domain_config: Optional[DomainConfig] = None  # on-prem AD connection details, if runs_onprem()
 
     def endpoints(self) -> CloudEndpoints:
         return NATIONAL_CLOUDS[self.national_cloud]

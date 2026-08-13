@@ -77,7 +77,7 @@ class TenantOrchestrator:
 
         if profile.runs_onprem():
             try:
-                ep, ad, ev, po = self._run_onprem()
+                ep, ad, ev, po = self._run_onprem(profile)
                 endpoints += ep
                 ad_objects += ad
                 events += ev
@@ -116,13 +116,17 @@ class TenantOrchestrator:
 
     # -- plane runners ------------------------------------------------------
 
-    def _run_onprem(self):
+    def _run_onprem(self, profile: TenantProfile):
         """Run the four on-prem collectors. Each failure is isolated, not fatal."""
         endpoints, ad_objects, events, policies = [], [], [], []
 
         for name, fn in [
             ("endpoint", lambda: EndpointCollector(demo=self.demo).collect()),
-            ("ad", lambda: ActiveDirectoryCollector().collect()),
+            ("ad", lambda: ActiveDirectoryCollector(
+                config=profile.domain_config,
+                secret_resolver=self.secret_resolver,
+                demo=self.demo,
+            ).collect()),
             ("event_log", lambda: EventLogCollector().collect()),
             ("policy", lambda: PolicyCollector().collect()),
         ]:
