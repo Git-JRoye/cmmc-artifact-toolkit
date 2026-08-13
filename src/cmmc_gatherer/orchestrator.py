@@ -1,0 +1,166 @@
+"""Per-tenant orchestration.
+
+Turns a list of ``TenantProfile`` objects into actual collection runs. For each
+tenant, this reads its configured plane(s) and auth method, builds only the
+collectors that apply, runs them, and returns aggregated artifacts keyed by
+tenant.
+
+This is intentionally decoupled from any specific credential store: you supply
+a ``secret_resolver`` callable (``secret_ref -> secret value``) that looks up
+secrets however you store them (vault, key store, env — your choice), and the
+orchestrator never touches secrets directly beyond passing that callable
+through to the Graph auth layer.
+
+ASSUMPTION TO VERIFY: this module builds an ``ArtifactCollection`` per tenant
+using keyword args ``endpoints=``, ``ad_objects=``, ``security_events=``,
+``policies=``. Confirm those match the real field names in
+``models/artifacts.py::ArtifactCollection`` — adjust the constructor call in
+``_empty_collection`` below if they differ. Everything else in this file is
+independent of that detail.
+"""
+
+import logging
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional
+
+from .cloud.cloud_config import Plane, TenantProfile
+from .cloud.graph import GraphClient, build_auth_provider
+from .collectors.cloud.entra_identity_collector import EntraIdentityCollector
+from .collectors.cloud.intune_device_collector import IntuneDeviceCollector
+from .collectors.onprem.ad_collector import ActiveDirectoryCollector
+from .collectors.onprem.endpoint_collector import EndpointCollector
+from .collectors.onprem.event_log_collector import EventLogCollector
+from .collectors.onprem.policy_collector import PolicyCollector
+from .models.artifacts import ArtifactCollection
+
+logger = logging.getLogger(__name__)
+
+SecretResolver = Callable[[str], str]
+
+
+@dataclass
+class TenantRunResult:
+    """Outcome of one tenant's collection run."""
+    tenant_key: str
+    display_name: str
+    collection: ArtifactCollection
+    errors: List[str] = field(default_factory=list)
+
+
+class TenantOrchestrator:
+    """Runs the correct collectors for each configured tenant."""
+
+    def __init__(self, secret_resolver: SecretResolver, demo: bool = False):
+        self.secret_resolver = secret_resolver
+        self.demo = demo  # forces on-prem endpoint collector into demo mode; no cloud equivalent needed
+
+    def run_all(self, profiles: List[TenantProfile]) -> Dict[str, TenantRunResult]:
+        """Run collection for every profile. One tenant's failure never blocks the rest."""
+        results: Dict[str, TenantRunResult] = {}
+        for profile in profiles:
+            try:
+                results[profile.tenant_key] = self.run_one(profile)
+            except Exception as e:
+                logger.error("Tenant %s failed entirely: %s", profile.tenant_key, e)
+                results[profile.tenant_key] = TenantRunResult(
+                    tenant_key=profile.tenant_key,
+                    display_name=profile.display_name,
+                    collection=self._empty_collection(),
+                    errors=[f"fatal: {e}"],
+                )
+        return results
+
+    def run_one(self, profile: TenantProfile) -> TenantRunResult:
+        """Run whichever plane(s) this tenant is configured for."""
+        errors: List[str] = []
+        endpoints, ad_objects, events, policies = [], [], [], []
+
+        if profile.runs_onprem():
+            try:
+                ep, ad, ev, po = self._run_onprem()
+                endpoints += ep
+                ad_objects += ad
+                events += ev
+                policies += po
+            except Exception as e:
+                logger.error("[%s] on-prem plane failed: %s", profile.tenant_key, e)
+                errors.append(f"onprem: {e}")
+
+        if profile.runs_cloud():
+            try:
+                ep, ad = self._run_cloud(profile)
+                endpoints += ep       # Intune devices, mapped to Endpoint
+                ad_objects += ad      # Entra users/groups, mapped to ADObject
+            except Exception as e:
+                logger.error("[%s] cloud plane failed: %s", profile.tenant_key, e)
+                errors.append(f"cloud: {e}")
+
+        collection = ArtifactCollection(
+            endpoints=endpoints,
+            ad_objects=ad_objects,
+            security_events=events,
+            policies=policies,
+        )
+        logger.info(
+            "[%s] collection complete: %d endpoint(s), %d AD/identity object(s), "
+            "%d event(s), %d policy record(s), %d error(s)",
+            profile.tenant_key, len(endpoints), len(ad_objects), len(events),
+            len(policies), len(errors),
+        )
+        return TenantRunResult(
+            tenant_key=profile.tenant_key,
+            display_name=profile.display_name,
+            collection=collection,
+            errors=errors,
+        )
+
+    # -- plane runners ------------------------------------------------------
+
+    def _run_onprem(self):
+        """Run the four on-prem collectors. Each failure is isolated, not fatal."""
+        endpoints, ad_objects, events, policies = [], [], [], []
+
+        for name, fn in [
+            ("endpoint", lambda: EndpointCollector(demo=self.demo).collect()),
+            ("ad", lambda: ActiveDirectoryCollector().collect()),
+            ("event_log", lambda: EventLogCollector().collect()),
+            ("policy", lambda: PolicyCollector().collect()),
+        ]:
+            try:
+                result = fn()
+            except Exception as e:
+                logger.error("on-prem %s collector failed: %s", name, e)
+                continue
+            if name == "endpoint":
+                endpoints = result
+            elif name == "ad":
+                ad_objects = result
+            elif name == "event_log":
+                events = result
+            elif name == "policy":
+                policies = result
+
+        return endpoints, ad_objects, events, policies
+
+    def _run_cloud(self, profile: TenantProfile):
+        """Build a Graph client for this tenant's cloud/auth, then run cloud collectors."""
+        auth = build_auth_provider(profile.auth_method, self.secret_resolver)
+        graph = GraphClient(profile, auth)
+
+        endpoints: List = []
+        try:
+            endpoints = IntuneDeviceCollector(graph).collect()
+        except Exception as e:
+            logger.error("[%s] Intune collector failed: %s", profile.tenant_key, e)
+
+        ad_objects: List = []
+        try:
+            ad_objects = EntraIdentityCollector(graph).collect()
+        except Exception as e:
+            logger.error("[%s] Entra identity collector failed: %s", profile.tenant_key, e)
+
+        return endpoints, ad_objects
+
+    @staticmethod
+    def _empty_collection() -> ArtifactCollection:
+        return ArtifactCollection(endpoints=[], ad_objects=[], security_events=[], policies=[])
