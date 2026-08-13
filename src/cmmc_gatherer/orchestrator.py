@@ -88,9 +88,10 @@ class TenantOrchestrator:
 
         if profile.runs_cloud():
             try:
-                ep, ad = self._run_cloud(profile)
+                ep, ad, cloud_errors = self._run_cloud(profile)
                 endpoints += ep       # Intune devices, mapped to Endpoint
                 ad_objects += ad      # Entra users/groups, mapped to ADObject
+                errors += cloud_errors
             except Exception as e:
                 logger.error("[%s] cloud plane failed: %s", profile.tenant_key, e)
                 errors.append(f"cloud: {e}")
@@ -148,6 +149,7 @@ class TenantOrchestrator:
 
     def _run_cloud(self, profile: TenantProfile):
         """Build a Graph client for this tenant's cloud/auth, then run cloud collectors."""
+        errors: List[str] = []
         auth = build_auth_provider(profile.auth_method, self.secret_resolver)
         graph = GraphClient(profile, auth)
 
@@ -156,14 +158,16 @@ class TenantOrchestrator:
             endpoints = IntuneDeviceCollector(graph).collect()
         except Exception as e:
             logger.error("[%s] Intune collector failed: %s", profile.tenant_key, e)
+            errors.append(f"intune: {e}")
 
         ad_objects: List = []
         try:
             ad_objects = EntraIdentityCollector(graph).collect()
         except Exception as e:
             logger.error("[%s] Entra identity collector failed: %s", profile.tenant_key, e)
+            errors.append(f"entra: {e}")
 
-        return endpoints, ad_objects
+        return endpoints, ad_objects, errors
 
     @staticmethod
     def _empty_collection() -> ArtifactCollection:
