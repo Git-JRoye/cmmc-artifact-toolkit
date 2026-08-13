@@ -57,8 +57,10 @@ class EntraIdentityCollector(CollectorBase):
         }
         out: List[ADObject] = []
         for u in self.graph.get_all("users", params=params):
-            last_sign_in = ((u.get("signInActivity") or {}).get("lastSignInDateTime"))
-            stale = self._is_stale(last_sign_in, cutoff)
+            sign_in_activity = u.get("signInActivity")
+            data_available = sign_in_activity is not None
+            last_sign_in = (sign_in_activity or {}).get("lastSignInDateTime") if sign_in_activity else None
+            stale = self._is_stale(last_sign_in, cutoff, data_available)
             out.append(ADObject(
                 distinguished_name=u.get("userPrincipalName") or u.get("id") or "unknown",
                 object_class="user",
@@ -71,6 +73,7 @@ class EntraIdentityCollector(CollectorBase):
                     "isGuest": (u.get("userType") == "Guest"),
                     "lastSignIn": last_sign_in,
                     "isStale": stale,
+                    "signInDataAvailable": data_available,
                     "source": "entra",
                 },
                 group_memberships=[],  # per-user memberOf is expensive; Phase-3 enrichment
@@ -105,9 +108,15 @@ class EntraIdentityCollector(CollectorBase):
         return out
 
     @staticmethod
-    def _is_stale(last_sign_in: str, cutoff: datetime) -> bool:
+    def _is_stale(last_sign_in, cutoff: datetime, data_available: bool):
+        # No sign-in data at all (commonly: no Entra ID P1 license on this
+        # account) means we genuinely cannot tell — return None rather than
+        # guessing "stale," which would be a false positive purely due to
+        # licensing, not actual inactivity.
+        if not data_available:
+            return None
         if not last_sign_in:
-            return True  # never signed in (within retained window) = treat as stale
+            return True  # data available, but never signed in = genuinely stale
         try:
             dt = datetime.fromisoformat(last_sign_in.replace("Z", "+00:00"))
             return dt < cutoff

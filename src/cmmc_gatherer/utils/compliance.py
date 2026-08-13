@@ -170,14 +170,14 @@ class ComplianceScorer:
     @classmethod
     def _score_ad_security(cls, artifacts: ArtifactCollection) -> Optional[int]:
         users = [o for o in artifacts.ad_objects if o.object_class == 'user']
-        if not users:
+        scoreable = [u for u in users if (u.attributes or {}).get('isStale') is not None]
+        if not scoreable:
             return None
         healthy = 0
-        for u in users:
+        for u in scoreable:
             attrs = u.attributes or {}
             disabled = bool(attrs.get('disabled', False))
             stale = bool(attrs.get('isStale', False))
-            # A disabled account isn't a problem — an ENABLED-but-stale one is.
             if disabled or not stale:
                 healthy += 1
-        return int((healthy / len(users)) * 100)
+        return int((healthy / len(scoreable)) * 100)
