@@ -74,17 +74,16 @@ ONPREM_PROFILE = None
 #     ),
 # )
 
-CLOUD_PROFILE = None
-# CLOUD_PROFILE = TenantProfile(
-#     tenant_key="pilot-cloud",
-#     display_name="Pilot M365 Dev Tenant",
-#     national_cloud=NationalCloud.COMMERCIAL,        # GCC_HIGH if that's your test tenant
-#     planes=[Plane.CLOUD],
-#     auth_method=AuthMethod.APP_REGISTRATION,
-#     tenant_id="<entra-tenant-guid>",
-#     client_id="<app-registration-client-id>",
-#     secret_ref="PILOT_GRAPH_CLIENT_SECRET",         # env var name, not the value
-# )
+CLOUD_PROFILE = TenantProfile(
+    tenant_key="tenguard",
+    display_name="Tenguard Security",
+    national_cloud=NationalCloud.COMMERCIAL,
+    planes=[Plane.CLOUD],
+    auth_method=AuthMethod.APP_REGISTRATION,
+    tenant_id="9f67a082-b275-4e67-9dc5-b1f6f12e7b99",
+    client_id="f598a875-1229-4635-b523-8ec93aa6c7a3",
+    secret_ref="TENGUARD_GRAPH_CLIENT_SECRET",
+)
 
 
 def summarize(result):
