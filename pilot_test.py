@@ -62,18 +62,11 @@ def pilot_secret_resolver(secret_ref: str) -> str:
 # out to skip that plane for this pilot run.
 # ---------------------------------------------------------------------------
 
-ONPREM_PROFILE = None
-# ONPREM_PROFILE = TenantProfile(
-#     tenant_key="pilot-onprem",
-#     display_name="Pilot On-Prem Test Environment",
-#     planes=[Plane.ONPREM],
-#     domain_config=DomainConfig(
-#         domain_controller="dc01.pilot.local",      # your test DC hostname/IP
-#         base_dn="DC=pilot,DC=local",                # your test domain's base DN
-#         bind_dn="pilot-svc@pilot.local",            # a read-only bind account
-#         secret_ref="PILOT_AD_BIND_PASSWORD",        # env var name, not the value
-#     ),
-# )
+ONPREM_PROFILE = TenantProfile(
+    tenant_key="royepc",
+    display_name="ROYEPC (local machine)",
+    planes=[Plane.ONPREM],
+)
 
 CLOUD_PROFILE = TenantProfile(
     tenant_key="tenguard",

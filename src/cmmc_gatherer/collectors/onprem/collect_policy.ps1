@@ -56,13 +56,13 @@ Try-Section -Name 'password_policy' -Body {
         if ($line -match '^\s*([A-Za-z]+)\s*=\s*(-?\d+)\s*$') {
             $key = $Matches[1]; $val = [int]$Matches[2]
             if ($numeric.ContainsKey($key)) {
-                $policies += [pscustomobject]@{
+                $script:policies += [pscustomobject]@{
                     policy_name = $key; policy_type = 'Local Security Policy'
                     status = 'Configured'; target = 'Computer'
                     value = "$val"; description = $numeric[$key]; last_applied = $null
                 }
             } elseif ($boolean.ContainsKey($key)) {
-                $policies += [pscustomobject]@{
+                $script:policies += [pscustomobject]@{
                     policy_name = $key; policy_type = 'Local Security Policy'
                     status = if ($val -eq 1) { 'Enabled' } else { 'Disabled' }
                     target = 'Computer'; value = $null
@@ -88,7 +88,7 @@ Try-Section -Name 'uac' -Body {
         foreach ($key in $uacKeys.Keys) {
             $val = $reg.$key
             if ($null -ne $val) {
-                $policies += [pscustomobject]@{
+                $script:policies += [pscustomobject]@{
                     policy_name = $key; policy_type = 'UAC (Local Policy)'
                     status = if ($val -eq 1) { 'Enabled' } elseif ($val -eq 0) { 'Disabled' } else { 'Configured' }
                     target = 'Computer'; value = "$val"
@@ -107,7 +107,7 @@ Try-Section -Name 'audit_policy' -Body {
             $csv = auditpol /get /category:"$cat" /r 2>$null | ConvertFrom-Csv
             foreach ($row in $csv) {
                 if ($row.Subcategory) {
-                    $policies += [pscustomobject]@{
+                    $script:policies += [pscustomobject]@{
                         policy_name = $row.Subcategory; policy_type = 'Audit Policy'
                         status = $row.'Inclusion Setting'; target = 'Computer'
                         value = $null; description = "Audit category: $cat"; last_applied = $null
@@ -136,7 +136,7 @@ Try-Section -Name 'applied_gpos' -Body {
     $lastAppliedLine = $raw | Where-Object { $_ -match 'Last time Group Policy was applied' } | Select-Object -First 1
     $lastApplied = if ($lastAppliedLine) { ($lastAppliedLine -split ':\s*', 2)[1].Trim() } else { $null }
 
-    $policies += [pscustomobject]@{
+    $script:policies += [pscustomobject]@{
         policy_name = 'Applied Group Policy Objects'; policy_type = 'Group Policy'
         status = if ($names.Count -gt 0) { 'Applied' } else { 'None Applied' }
         target = 'Computer'; value = ($names -join '; ')

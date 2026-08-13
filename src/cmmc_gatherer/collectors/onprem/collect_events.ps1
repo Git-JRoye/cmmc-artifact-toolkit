@@ -83,8 +83,15 @@ try {
 } catch [System.Diagnostics.Eventing.Reader.EventLogNotFoundException] {
     $errors += "Security log not found on this host"
 } catch {
-    # Common case: access denied when not elevated / not in Event Log Readers.
-    $errors += "Get-WinEvent failed: $($_.Exception.Message)"
+    if ($_.Exception.Message -match 'No events were found') {
+        # Get-WinEvent throws a terminating error when zero events match
+        # the filter — that's a legitimate outcome (nothing in this
+        # lookback window matched), not a collection failure. Leave
+        # $events empty and don't record it as an error.
+    } else {
+        # Common case: access denied when not elevated / not in Event Log Readers.
+        $errors += "Get-WinEvent failed: $($_.Exception.Message)"
+    }
 }
 
 [pscustomobject]@{
