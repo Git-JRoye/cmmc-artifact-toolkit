@@ -31,8 +31,7 @@ Further fixes after reviewing real generated reports:
   - A "Coverage Notes" section now discloses when an entire category
     (policies or security events) has zero data for a plane that's actually
     present, so a clean score can't read as "everything was checked" when
-    large categories were never assessed (this is currently the case for the
-    cloud plane — there is no cloud policy or event collector yet).
+    large categories were never assessed.
   - Failing policies are now grouped into separate findings by policy_type
     instead of one undifferentiated comma-separated list mixing e.g.
     password-policy failures with two dozen individual audit subcategories.
@@ -57,17 +56,28 @@ Further fixes after reviewing the firewall finding and the missing AD data:
   - "Firewall Not Fully Enabled" now names which specific profile(s)
     (Domain/Private/Public) are disabled per host, from data the collector
     already gathers (metadata['firewall_profiles']) but the report wasn't
-    surfacing — "not fully enabled" alone wasn't actionable. Includes a
-    caveat that this reflects the built-in Windows Firewall toggle only; a
-    third-party firewall/EDR product may be intentionally handling blocking
-    instead, and that's a judgment call for whoever reviews the finding.
-  - AD/Entra user and group data was being collected (including the
-    privileged-role and MFA enrichment added earlier) and used only to
+    surfacing. Includes a caveat that a third-party firewall/EDR product may
+    be intentionally handling blocking instead.
+  - AD/Entra user and group data was being collected but only used to
     compute the ad_security score number — never actually shown. Added two
     new tables (Users, Groups) covering both on-prem AD and Entra shapes,
-    plus two new findings: "Privileged Account Without MFA" (a real,
-    high-severity gap directly implicating IA.L2-3.5.3) and "Stale
-    Privileged Account" (orphaned elevated access).
+    plus two new findings: "Privileged Account Without MFA" and "Stale
+    Privileged Account".
+
+Further fixes after adding real cloud policy/event collectors:
+  - Coverage notes and Assessment Scope previously checked artifacts.policies
+    / artifacts.security_events for emptiness in aggregate, and previously
+    unconditionally claimed cloud policy/event review "is not yet
+    implemented" — both are now real. Coverage notes check by SOURCE
+    (_CLOUD_POLICY_TYPES / _CLOUD_EVENT_SOURCES) instead, so a tenant with
+    real on-prem policy data but a failed/empty cloud policy collection is
+    still correctly flagged (the old aggregate-emptiness check would have
+    missed that), and the messaging no longer falsely claims something
+    unimplemented when it simply returned no data this run.
+  - New findings for the two new cloud policy types (Conditional Access,
+    Intune Configuration Profile) so a failing policy of either type gets
+    real, type-specific guidance instead of the generic "via Group Policy"
+    fallback recommendation, which doesn't apply to cloud policies at all.
 """
 
 import logging
@@ -78,6 +88,12 @@ from .base import ExporterBase
 from ..utils.compliance import ComplianceScorer
 
 logger = logging.getLogger(__name__)
+
+# Shared between coverage-note detection and Assessment Scope generation, so
+# a cloud-sourced policy/event record is never mistaken for an on-prem one
+# (or vice versa) in either place.
+_CLOUD_POLICY_TYPES = ('Conditional Access', 'Intune Configuration Profile')
+_CLOUD_EVENT_SOURCES = ('Entra Sign-In Logs', 'Entra Directory Audit Logs')
 
 
 class MSPReportExporter(ExporterBase):
@@ -452,15 +468,22 @@ class MSPReportExporter(ExporterBase):
             html += "            </table>\n"
 
         scope_items = []
-        if onprem_eps or artifacts.security_events:
+        if onprem_eps:
             scope_items.append("Windows endpoint security configurations")
-            scope_items.append("Security event logging and monitoring")
+        if any(e.source not in _CLOUD_EVENT_SOURCES for e in artifacts.security_events):
+            scope_items.append("Windows security event logging and monitoring")
+        if any(e.source in _CLOUD_EVENT_SOURCES for e in artifacts.security_events):
+            scope_items.append("Entra sign-in and directory audit log review")
         if any(p.policy_type == 'Local Security Policy' for p in artifacts.policies):
             scope_items.append("Local security and account lockout policy")
         if any(p.policy_type == 'Group Policy' for p in artifacts.policies):
             scope_items.append("Group Policy compliance")
         if any(p.policy_type == 'Audit Policy' for p in artifacts.policies):
             scope_items.append("Audit policy configuration")
+        if any(p.policy_type == 'Conditional Access' for p in artifacts.policies):
+            scope_items.append("Entra Conditional Access policy configuration")
+        if any(p.policy_type == 'Intune Configuration Profile' for p in artifacts.policies):
+            scope_items.append("Intune device configuration profile deployment status")
         if any((o.attributes or {}).get('source') == 'entra' for o in artifacts.ad_objects):
             scope_items.append("Entra ID identity and access configuration")
         if any((o.attributes or {}).get('source') != 'entra' for o in artifacts.ad_objects):
@@ -690,6 +713,20 @@ class MSPReportExporter(ExporterBase):
                 '(Advanced Audit Policy Configuration). Comprehensive audit logging is '
                 'directly relevant to the Audit and Accountability (AU) CMMC practice family.',
             ),
+            'Conditional Access': (
+                'Conditional Access Policy Not Enforced', 'High',
+                'Review the affected Conditional Access polic(ies) in the Entra admin '
+                'center. A policy in "report-only" or "disabled" state provides no real '
+                'enforcement — move it to enabled once validated, or confirm the disabled '
+                'state is intentional (e.g. a deprecated policy pending removal).',
+            ),
+            'Intune Configuration Profile': (
+                'Intune Configuration Profile Deployment Failing', 'High',
+                'Review the failing device(s) for the affected configuration profile(s) '
+                'in the Intune admin center. Common causes include a device being '
+                'offline, failing a prerequisite, or an OS version incompatible with the '
+                'profile\'s settings.',
+            ),
         }
         for policy_type, names in failing_by_type.items():
             title, severity, recommendation = type_config.get(
@@ -722,27 +759,43 @@ class MSPReportExporter(ExporterBase):
         """Disclose categories with zero data for a plane that's actually
         present, so a clean score never reads as 'everything was checked'
         when large categories were never assessed. Returns an empty list
-        when there's nothing to disclose (e.g. a plane with real, present
-        policy/event data, or a plane not run at all)."""
+        when there's nothing to disclose.
+
+        Checks by SOURCE (cloud vs. on-prem policy_type / event source), not
+        by whether artifacts.policies/security_events is empty overall — a
+        tenant running both planes could have real on-prem policy data while
+        the cloud policy collector returned nothing, and the original
+        aggregate-emptiness check would have missed that gap entirely.
+        """
         notes = []
 
-        if cloud_eps and not artifacts.policies:
+        has_cloud_policies = any(p.policy_type in _CLOUD_POLICY_TYPES for p in artifacts.policies)
+        has_cloud_events = any(e.source in _CLOUD_EVENT_SOURCES for e in artifacts.security_events)
+        has_onprem_policies = any(p.policy_type not in _CLOUD_POLICY_TYPES for p in artifacts.policies)
+        has_onprem_events = any(e.source not in _CLOUD_EVENT_SOURCES for e in artifacts.security_events)
+
+        if cloud_eps and not has_cloud_policies:
             notes.append(
                 'Cloud-managed policy configuration (Entra Conditional Access, Intune '
-                'configuration profiles) was not evaluated. This capability is not yet '
-                'implemented for the cloud plane.'
+                'configuration profiles) returned no data for this assessment. This may '
+                'mean none are configured in this tenant, or that the collector could not '
+                'reach them — check for a Policy.Read.All / '
+                'DeviceManagementConfiguration.Read.All permission gap before assuming '
+                'the tenant genuinely has no policies configured.'
             )
-        if cloud_eps and not artifacts.security_events:
+        if cloud_eps and not has_cloud_events:
             notes.append(
-                'Cloud identity sign-in and audit log review was not evaluated. This '
-                'capability is not yet implemented for the cloud plane.'
+                'Cloud identity sign-in and audit log review returned no data for this '
+                'assessment. This may reflect a genuine sign-in log retention limit on '
+                'the tenant\'s Entra ID license tier, an empty lookback window, or an '
+                'AuditLog.Read.All permission gap.'
             )
-        if onprem_eps and not artifacts.policies:
+        if onprem_eps and not has_onprem_policies:
             notes.append(
                 'On-prem security policy data was not available for this assessment '
                 '(no records were returned by the collector).'
             )
-        if onprem_eps and not artifacts.security_events:
+        if onprem_eps and not has_onprem_events:
             notes.append(
                 'On-prem security event log data was not available for this assessment '
                 '(no records were returned by the collector).'

@@ -25,6 +25,8 @@ from typing import Callable, Dict, List, Optional
 
 from .cloud.cloud_config import Plane, TenantProfile
 from .cloud.graph import GraphClient, build_auth_provider
+from .collectors.cloud.cloud_event_collector import CloudSecurityEventCollector
+from .collectors.cloud.cloud_policy_collector import CloudPolicyCollector
 from .collectors.cloud.entra_identity_collector import EntraIdentityCollector
 from .collectors.cloud.intune_device_collector import IntuneDeviceCollector
 from .collectors.onprem.ad_collector import ActiveDirectoryCollector
@@ -89,9 +91,11 @@ class TenantOrchestrator:
 
         if profile.runs_cloud():
             try:
-                ep, ad, cloud_errors = self._run_cloud(profile)
+                ep, ad, ev, po, cloud_errors = self._run_cloud(profile)
                 cloud_endpoints += ep  # Intune devices, mapped to Endpoint
                 ad_objects += ad       # Entra users/groups, mapped to ADObject
+                events += ev           # Entra sign-in + directory audit logs, mapped to SecurityEvent
+                policies += po         # Conditional Access + Intune config profiles, mapped to Policy
                 errors += cloud_errors
             except Exception as e:
                 logger.error("[%s] cloud plane failed: %s", profile.tenant_key, e)
@@ -239,7 +243,21 @@ class TenantOrchestrator:
             logger.error("[%s] Entra identity collector failed: %s", profile.tenant_key, e)
             errors.append(f"entra: {e}")
 
-        return endpoints, ad_objects, errors
+        events: List = []
+        try:
+            events = CloudSecurityEventCollector(graph).collect()
+        except Exception as e:
+            logger.error("[%s] Cloud security event collector failed: %s", profile.tenant_key, e)
+            errors.append(f"cloud_events: {e}")
+
+        policies: List = []
+        try:
+            policies = CloudPolicyCollector(graph).collect()
+        except Exception as e:
+            logger.error("[%s] Cloud policy collector failed: %s", profile.tenant_key, e)
+            errors.append(f"cloud_policies: {e}")
+
+        return endpoints, ad_objects, events, policies, errors
 
     @staticmethod
     def _empty_collection() -> ArtifactCollection:

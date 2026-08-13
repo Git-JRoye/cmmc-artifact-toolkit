@@ -134,3 +134,26 @@ class GraphClient:
             for item in body.get("value", []):
                 yield item
             url = body.get("@odata.nextLink")
+
+    def get_one(self, path: str, params: Optional[Dict[str, str]] = None,
+                retries: int = 1) -> Dict[str, Any]:
+        """Fetch a single Graph resource (not a paged collection) — e.g. a
+        per-object status/overview endpoint that returns one JSON object
+        rather than a {"value": [...]} collection. Honors 429 throttling the
+        same way get_all does, since a per-object fan-out (one call per item
+        in a list) is exactly the pattern most likely to get throttled."""
+        import requests
+
+        url = f"{self.base}/{path.lstrip('/')}"
+        attempt = 0
+        while True:
+            resp = requests.get(url, headers=self._headers(), params=params, timeout=30)
+            if resp.status_code == 429 and attempt < retries:
+                import time
+                wait = int(resp.headers.get("Retry-After", "5"))
+                logger.warning("Graph throttled; sleeping %ss", wait)
+                time.sleep(wait)
+                attempt += 1
+                continue
+            resp.raise_for_status()
+            return resp.json()
