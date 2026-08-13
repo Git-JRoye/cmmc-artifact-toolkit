@@ -2,10 +2,10 @@
 
 import logging
 from typing import Dict, List, Optional
-from .collectors.endpoint_collector import EndpointCollector
-from .collectors.ad_collector import ActiveDirectoryCollector
-from .collectors.event_log_collector import EventLogCollector
-from .collectors.policy_collector import PolicyCollector
+from .collectors.onprem.endpoint_collector import EndpointCollector
+from .collectors.onprem.ad_collector import ActiveDirectoryCollector
+from .collectors.onprem.event_log_collector import EventLogCollector
+from .collectors.onprem.policy_collector import PolicyCollector
 from .exporters.exporter_factory import ExporterFactory
 from .models.artifacts import ArtifactCollection
 

@@ -1,2 +1,4 @@
 pywin32>=300
 ldap3>=2.9.1
+msal>=1.24.0
+requests>=2.31.0
