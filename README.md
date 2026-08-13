@@ -21,7 +21,7 @@ Entra ID identity collector (users, groups, guests, stale accounts)	✅ Real —
 Intune device collector (compliance, encryption, management state)	✅ Real — Microsoft Graph
 Per-tenant orchestrator (runs the right plane per client)	✅ Real
 National-cloud support (commercial / GCC / GCC High / DoD)	✅ Real for app-registration auth; GDAP and interactive auth are unimplemented seams
-On-prem AD, event log, and policy collectors	⚠️ Still demo data — not yet rebuilt
+On-prem AD, event log, and policy collectors	✅ Real — LDAP (AD) and PowerShell-backed (event log, policy)
 Compliance scoring	⚠️ Placeholder heuristics — not yet mapped to real 800-171 practices or SPRS methodology
 SSP / POA&M generation	❌ Not started
 
