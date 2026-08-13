@@ -109,7 +109,7 @@ class MSPReportExporter(ExporterBase):
     ) -> bool:
         try:
             html_content = self._generate_msp_report(artifacts, customer_name, assessment_id)
-            with open(output_path, 'w') as f:
+            with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(html_content)
             logger.info(f"Exported MSP report: {output_path}")
             return True
@@ -184,6 +184,7 @@ class MSPReportExporter(ExporterBase):
         html = f"""<!DOCTYPE html>
 <html>
 <head>
+    <meta charset="UTF-8">
     <title>CMMC Compliance Assessment Report</title>
     <style>
         * {{ margin: 0; padding: 0; }}
