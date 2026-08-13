@@ -1,8 +1,32 @@
-"""MSP-specific compliance report exporter."""
+"""MSP-specific compliance report exporter.
+
+Fixes applied after reviewing the original implementation against real
+collected data:
+
+  - Findings no longer flag cloud (Intune) endpoints as "firewall disabled" /
+    "antivirus inactive" — those fields are deliberately None for cloud
+    endpoints (not applicable, not a failure). Only on-prem-sourced endpoints
+    (identified the same way ComplianceScorer does: firewall_status is not
+    None) are evaluated for those two findings.
+  - Policy findings now reuse ComplianceScorer._policy_passes() instead of a
+    naive status == "Disabled" check, so security-inverted settings (e.g.
+    ClearTextPassword should be Disabled) are judged correctly instead of
+    being flagged backwards.
+  - Cloud endpoints get their own table showing the real Intune signals
+    (compliance state, encryption, management state) instead of being
+    invisible or rendered with blank on-prem-shaped columns.
+  - Policy table coloring uses the same pass/fail logic instead of only
+    recognizing the literal string "Enabled" as good — so real records like
+    "Configured" or "Success and Failure" render correctly instead of as an
+    ambiguous warning color.
+  - Assessment Scope section describes only the plane(s) actually present in
+    the data, instead of always describing an on-prem/AD engagement.
+"""
 
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+
 from .base import ExporterBase
 from ..utils.compliance import ComplianceScorer
 
@@ -30,6 +54,17 @@ class MSPReportExporter(ExporterBase):
             logger.error(f"MSP report export failed: {e}")
             return False
 
+    # -- plane helpers, matching ComplianceScorer's own split -----------------
+
+    @staticmethod
+    def _onprem_endpoints(artifacts: Any) -> List:
+        return [ep for ep in artifacts.endpoints if ep.firewall_status is not None]
+
+    @staticmethod
+    def _cloud_endpoints(artifacts: Any) -> List:
+        return [ep for ep in artifacts.endpoints
+                if ep.firewall_status is None and (ep.metadata or {}).get('source') == 'intune']
+
     def _generate_msp_report(
         self,
         artifacts: Any,
@@ -38,6 +73,8 @@ class MSPReportExporter(ExporterBase):
     ) -> str:
         compliance_score = ComplianceScorer.calculate_overall_score(artifacts)
         findings = self._generate_findings(artifacts)
+        onprem_eps = self._onprem_endpoints(artifacts)
+        cloud_eps = self._cloud_endpoints(artifacts)
 
         customer_name = customer_name or "Unnamed Customer"
         assessment_id = assessment_id or "CMMC-" + datetime.now().strftime("%Y%m%d%H%M%S")
@@ -86,6 +123,7 @@ class MSPReportExporter(ExporterBase):
                   margin-top: 40px; border-top: 1px solid #ddd; color: #999; }}
         .summary-table td {{ padding: 8px; }}
         .summary-table td:first-child {{ font-weight: bold; width: 30%; }}
+        .na {{ color: #999; font-style: italic; }}
     </style>
 </head>
 <body>
@@ -119,36 +157,61 @@ class MSPReportExporter(ExporterBase):
             <h2>Infrastructure Overview</h2>
             <table>
                 <tr><th>Metric</th><th>Count</th></tr>
-                <tr><td>Windows Endpoints</td><td>{len(artifacts.endpoints)}</td></tr>
-                <tr><td>Active Directory Objects</td><td>{len(artifacts.ad_objects)}</td></tr>
+                <tr><td>On-Prem Endpoints</td><td>{len(onprem_eps)}</td></tr>
+                <tr><td>Cloud-Managed Devices (Intune)</td><td>{len(cloud_eps)}</td></tr>
+                <tr><td>Active Directory / Identity Objects</td><td>{len(artifacts.ad_objects)}</td></tr>
                 <tr><td>Security Policies</td><td>{len(artifacts.policies)}</td></tr>
                 <tr><td>Security Events Analyzed</td><td>{len(artifacts.security_events)}</td></tr>
             </table>
         </div>
+"""
 
-        <div class="section">
-            <h2>Endpoint Status</h2>
+        if onprem_eps:
+            html += """        <div class="section">
+            <h2>On-Prem Endpoint Status</h2>
             <table>
                 <tr>
                     <th>Hostname</th><th>IP Address</th><th>OS Version</th>
                     <th>Firewall</th><th>Antivirus</th>
                 </tr>
 """
-        for ep in artifacts.endpoints:
-            fw_color = 'green' if ep.firewall_status == 'Enabled' else 'red'
-            av_color = 'green' if ep.antivirus_status == 'Active' else 'red'
-            html += (
-                f"                <tr><td>{ep.hostname}</td><td>{ep.ip_address}</td>"
-                f"<td>{ep.os_version}</td>"
-                f"<td><span style=\"color:{fw_color}\">{ep.firewall_status or 'Unknown'}</span></td>"
-                f"<td><span style=\"color:{av_color}\">{ep.antivirus_status or 'Unknown'}</span></td>"
-                f"</tr>\n"
-            )
+            for ep in onprem_eps:
+                fw_color = 'green' if ep.firewall_status == 'Enabled' else ('orange' if ep.firewall_status == 'Partial' else 'red')
+                av_color = 'green' if ep.antivirus_status == 'Active' else 'red'
+                html += (
+                    f"                <tr><td>{ep.hostname}</td><td>{ep.ip_address}</td>"
+                    f"<td>{ep.os_version}</td>"
+                    f"<td><span style=\"color:{fw_color}\">{ep.firewall_status or 'Unknown'}</span></td>"
+                    f"<td><span style=\"color:{av_color}\">{ep.antivirus_status or 'Unknown'}</span></td>"
+                    f"</tr>\n"
+                )
+            html += "            </table>\n        </div>\n"
 
-        html += """            </table>
-        </div>
+        if cloud_eps:
+            html += """        <div class="section">
+            <h2>Cloud-Managed Devices (Intune)</h2>
+            <table>
+                <tr>
+                    <th>Hostname</th><th>OS Version</th><th>Compliance State</th>
+                    <th>Encrypted</th><th>Management State</th><th>Owner</th>
+                </tr>
+"""
+            for ep in cloud_eps:
+                meta = ep.metadata or {}
+                compliant = meta.get('is_compliant')
+                comp_color = 'green' if compliant else 'red'
+                enc = meta.get('is_encrypted')
+                enc_color = 'green' if enc else 'orange'
+                html += (
+                    f"                <tr><td>{ep.hostname}</td><td>{ep.os_version}</td>"
+                    f"<td><span style=\"color:{comp_color}\">{meta.get('compliance_state', 'Unknown')}</span></td>"
+                    f"<td><span style=\"color:{enc_color}\">{enc}</span></td>"
+                    f"<td>{meta.get('management_state', 'Unknown')}</td>"
+                    f"<td>{meta.get('owner_upn', 'Unknown')}</td></tr>\n"
+                )
+            html += "            </table>\n        </div>\n"
 
-        <div class="section">
+        html += """        <div class="section">
             <h2>Findings &amp; Recommendations</h2>
 """
         for finding in findings:
@@ -165,33 +228,58 @@ class MSPReportExporter(ExporterBase):
                 f"<strong>Recommendation:</strong> {finding['recommendation']}</div>\n"
             )
 
-        html += """        </div>
+        if artifacts.policies:
+            html += """        </div>
 
         <div class="section">
             <h2>Policy Compliance</h2>
             <table>
                 <tr><th>Policy</th><th>Type</th><th>Status</th><th>Current Value</th></tr>
 """
-        for policy in artifacts.policies:
-            status_color = 'green' if policy.status == 'Enabled' else 'orange'
-            html += (
-                f"                <tr><td>{policy.policy_name}</td><td>{policy.policy_type}</td>"
-                f"<td><span style=\"color:{status_color}\">{policy.status}</span></td>"
-                f"<td>{policy.value or 'N/A'}</td></tr>\n"
-            )
+            for policy in artifacts.policies:
+                passes = ComplianceScorer._policy_passes(policy)
+                if passes is True:
+                    status_color = 'green'
+                elif passes is False:
+                    status_color = 'red'
+                else:
+                    status_color = '#999'  # informational / no specific rule — not a warning
+                html += (
+                    f"                <tr><td>{policy.policy_name}</td><td>{policy.policy_type}</td>"
+                    f"<td><span style=\"color:{status_color}\">{policy.status}</span></td>"
+                    f"<td>{policy.value or 'N/A'}</td></tr>\n"
+                )
+            html += "            </table>\n"
 
-        html += f"""            </table>
-        </div>
+        scope_items = []
+        if onprem_eps or artifacts.security_events:
+            scope_items.append("Windows endpoint security configurations")
+            scope_items.append("Security event logging and monitoring")
+        if any(p.policy_type == 'Local Security Policy' for p in artifacts.policies):
+            scope_items.append("Local security and account lockout policy")
+        if any(p.policy_type == 'Group Policy' for p in artifacts.policies):
+            scope_items.append("Group Policy compliance")
+        if any(p.policy_type == 'Audit Policy' for p in artifacts.policies):
+            scope_items.append("Audit policy configuration")
+        if any((o.attributes or {}).get('source') == 'entra' for o in artifacts.ad_objects):
+            scope_items.append("Entra ID identity and access configuration")
+        if any((o.attributes or {}).get('source') != 'entra' for o in artifacts.ad_objects):
+            scope_items.append("Active Directory policy implementations")
+        if cloud_eps:
+            scope_items.append("Intune device compliance and management status")
+        if onprem_eps:
+            scope_items.append("Firewall and antivirus deployment status (on-prem)")
+        if not scope_items:
+            scope_items.append("No collection data was available for this assessment")
 
+        scope_html = "\n".join(f"                <li>{item}</li>" for item in scope_items)
+
+        html += f"""
         <div class="section">
             <h2>Assessment Scope</h2>
             <p>This assessment evaluated:</p>
             <ul>
-                <li>Windows endpoint security configurations</li>
-                <li>Active Directory policy implementations</li>
-                <li>Security event logging and monitoring</li>
-                <li>Group Policy compliance</li>
-                <li>Firewall and antivirus deployment status</li>
+{scope_html}
             </ul>
         </div>
 
@@ -199,7 +287,7 @@ class MSPReportExporter(ExporterBase):
             <p><strong>Assessment Disclaimer:</strong> This report is generated for compliance
             assessment purposes. Recommendations should be reviewed by qualified security
             professionals before implementation.</p>
-            <p>Generated by: CMMC Artifact Gathering Tool v1.0 | Assessment ID: {assessment_id}</p>
+            <p>Generated by: CMMC Artifact Toolkit | Assessment ID: {assessment_id}</p>
         </div>
     </div>
 </body>
@@ -208,36 +296,63 @@ class MSPReportExporter(ExporterBase):
 
     def _generate_findings(self, artifacts: Any) -> List[Dict[str, str]]:
         findings = []
+        onprem_eps = self._onprem_endpoints(artifacts)
+        cloud_eps = self._cloud_endpoints(artifacts)
 
+        # On-prem-only checks: cloud endpoints deliberately have these fields
+        # set to None (not applicable), so they must never be evaluated here.
         disabled_firewalls = [
-            ep.hostname for ep in artifacts.endpoints if ep.firewall_status != "Enabled"
+            ep.hostname for ep in onprem_eps if ep.firewall_status != "Enabled"
         ]
         if disabled_firewalls:
             findings.append({
-                'title': 'Firewall Not Enabled',
+                'title': 'Firewall Not Fully Enabled',
                 'severity': 'Critical',
-                'description': f'Firewall is disabled on: {", ".join(disabled_firewalls)}',
-                'recommendation': 'Enable Windows Firewall on all endpoints immediately',
+                'description': f'Firewall is not fully enabled on: {", ".join(disabled_firewalls)}',
+                'recommendation': 'Enable Windows Firewall on all profiles for all on-prem endpoints',
             })
 
         inactive_av = [
-            ep.hostname for ep in artifacts.endpoints if ep.antivirus_status != "Active"
+            ep.hostname for ep in onprem_eps if ep.antivirus_status != "Active"
         ]
         if inactive_av:
             findings.append({
                 'title': 'Antivirus Not Active',
                 'severity': 'Critical',
                 'description': f'Antivirus is inactive on: {", ".join(inactive_av)}',
-                'recommendation': 'Deploy and activate antivirus protection on all endpoints',
+                'recommendation': 'Deploy and activate antivirus protection on all on-prem endpoints',
             })
 
-        disabled_policies = [p.policy_name for p in artifacts.policies if p.status == "Disabled"]
-        if disabled_policies:
+        # Cloud-native finding, using the real Intune compliance signal instead
+        # of borrowing on-prem checks that don't apply to these devices.
+        noncompliant_cloud = [
+            ep.hostname for ep in cloud_eps if not (ep.metadata or {}).get('is_compliant')
+        ]
+        if noncompliant_cloud:
             findings.append({
-                'title': 'Security Policies Disabled',
+                'title': 'Intune Device Non-Compliant',
+                'severity': 'Critical',
+                'description': f'The following managed devices are non-compliant per Intune: '
+                                f'{", ".join(noncompliant_cloud)}',
+                'recommendation': 'Review the failing compliance policy in Intune for each device '
+                                   'and remediate (encryption, OS version, or configuration drift).',
+            })
+
+        # Policy findings reuse the same pass/fail rules as the scorer, so an
+        # inverted setting (e.g. ClearTextPassword should be Disabled) is
+        # judged correctly instead of a blind status == "Disabled" check.
+        failing_policies = [
+            p.policy_name for p in artifacts.policies
+            if ComplianceScorer._policy_passes(p) is False
+        ]
+        if failing_policies:
+            findings.append({
+                'title': 'Security Policy Settings Below Recommended Baseline',
                 'severity': 'High',
-                'description': f'The following policies are disabled: {", ".join(disabled_policies)}',
-                'recommendation': 'Review and enable critical security policies through Group Policy',
+                'description': f'The following settings do not meet the recommended baseline: '
+                                f'{", ".join(failing_policies)}',
+                'recommendation': 'Review and remediate these settings via Group Policy or local '
+                                   'security policy.',
             })
 
         if not findings:
