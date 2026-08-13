@@ -41,6 +41,7 @@ from cmmc_gatherer.cloud.cloud_config import (  # noqa: E402
 from cmmc_gatherer.onprem.domain_config import DomainConfig  # noqa: E402
 from cmmc_gatherer.orchestrator import TenantOrchestrator  # noqa: E402
 from cmmc_gatherer.utils.compliance import ComplianceScorer  # noqa: E402
+from cmmc_gatherer.exporters.msp_report_exporter import MSPReportExporter  # noqa: E402
 
 
 def pilot_secret_resolver(secret_ref: str) -> str:
@@ -143,6 +144,15 @@ def main():
 
     for result in results.values():
         summarize(result)
+
+    for result in results.values():
+        out_path = f"report_{result.tenant_key}.html"
+        MSPReportExporter().export(
+            result.collection, out_path,
+            customer_name=result.display_name,
+            assessment_id=f"PILOT-{result.tenant_key.upper()}",
+        )
+        print(f"\nReport written: {out_path}")
 
 
 if __name__ == "__main__":

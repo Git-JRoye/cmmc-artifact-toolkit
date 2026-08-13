@@ -138,3 +138,5 @@ reports/
 *.csv
 *.xml
 config.yaml
+report_*.html
+*.cfg
