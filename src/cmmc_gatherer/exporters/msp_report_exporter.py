@@ -36,6 +36,22 @@ Further fixes after reviewing real generated reports:
   - Failing policies are now grouped into separate findings by policy_type
     instead of one undifferentiated comma-separated list mixing e.g.
     password-policy failures with two dozen individual audit subcategories.
+
+Further fixes after the second real pilot run (device double-counting and
+misleading full-coverage scores):
+  - Endpoints merged across on-prem and Intune by the orchestrator (matched
+    by hostname) now show their Intune compliance/encryption signal inline
+    in the on-prem table (a new "Also Cloud-Managed" column) instead of that
+    signal disappearing just because the device is counted once, not twice.
+  - Non-compliance and encryption findings now check every endpoint with an
+    Intune signal, standalone or merged (_intune_signal helper), so a hybrid
+    device's failing status can't silently vanish because it moved out of
+    the pure-cloud_eps list.
+  - The overall score is now paired everywhere with a coverage figure
+    (ComplianceScorer.calculate_coverage): a red "Coverage incomplete" banner
+    under the score, plus a Scoring Coverage row in the Executive Summary,
+    so a score based on only one or two of six categories can never read as
+    a fully-assessed tenant.
 """
 
 import logging
@@ -87,6 +103,7 @@ class MSPReportExporter(ExporterBase):
         assessment_id: Optional[str],
     ) -> str:
         compliance_score = ComplianceScorer.calculate_overall_score(artifacts)
+        coverage = ComplianceScorer.calculate_coverage(artifacts)
         findings = self._generate_findings(artifacts)
         onprem_eps = self._onprem_endpoints(artifacts)
         cloud_eps = self._cloud_endpoints(artifacts)
@@ -109,6 +126,20 @@ class MSPReportExporter(ExporterBase):
         customer_name = customer_name or "Unnamed Customer"
         assessment_id = assessment_id or "CMMC-" + datetime.now().strftime("%Y%m%d%H%M%S")
         score_class = 'good' if compliance_score >= 80 else ('warning' if compliance_score >= 60 else 'critical')
+
+        # A score renormalized across only the dimensions with data can look
+        # like a full assessment when it isn't — this banner makes the actual
+        # coverage impossible to miss, right next to the number it qualifies.
+        coverage_banner_html = ""
+        if coverage['assessed_weight_pct'] < 100:
+            missing_labels = ', '.join(d.replace('_', ' ') for d in coverage['missing_dimensions'])
+            coverage_banner_html = f"""
+                <div class="recommendation" style="border-left-color:#f44336;background:#ffebee;margin-top:15px;">
+                    <strong>Coverage incomplete:</strong> this score is based on
+                    {coverage['assessed_count']} of {coverage['total_count']} scoring categories
+                    ({coverage['assessed_weight_pct']}% of total scoring weight).
+                    Not assessed: {missing_labels}.
+                </div>"""
 
         html = f"""<!DOCTYPE html>
 <html>
@@ -170,6 +201,8 @@ class MSPReportExporter(ExporterBase):
                 <tr><td>Assessment ID:</td><td>{assessment_id}</td></tr>
                 <tr><td>Assessment Date:</td><td>{datetime.now().strftime("%Y-%m-%d")}</td></tr>
                 <tr><td>Overall Compliance Score:</td><td>{compliance_score}%</td></tr>
+                <tr><td>Scoring Coverage:</td><td>{coverage['assessed_count']} of {coverage['total_count']} categories
+                    ({coverage['assessed_weight_pct']}% of scoring weight)</td></tr>
             </table>
         </div>
 
@@ -180,7 +213,7 @@ class MSPReportExporter(ExporterBase):
                     <div class="number">{compliance_score}%</div>
                     <div class="label">Overall Compliance</div>
                 </div>
-            </div>
+            </div>{coverage_banner_html}
         </div>
 
         <div class="section">
@@ -203,17 +236,32 @@ class MSPReportExporter(ExporterBase):
             <table>
                 <tr>
                     <th>Hostname</th><th>IP Address</th><th>OS Version</th>
-                    <th>Firewall</th><th>Antivirus</th>
+                    <th>Firewall</th><th>Antivirus</th><th>Also Cloud-Managed (Intune)</th>
                 </tr>
 """
             for ep in onprem_eps:
                 fw_color = 'green' if ep.firewall_status == 'Enabled' else ('orange' if ep.firewall_status == 'Partial' else 'red')
                 av_color = 'green' if ep.antivirus_status == 'Active' else 'red'
+                # A device merged from both planes (matched by hostname — see
+                # orchestrator._merge_endpoints) carries its Intune record
+                # under metadata['intune']. Surface that here so the signal
+                # isn't lost just because it's reported once, not twice.
+                intune = (ep.metadata or {}).get('intune')
+                if intune:
+                    compliant = intune.get('is_compliant')
+                    enc = intune.get('is_encrypted')
+                    cm_color = 'green' if compliant else 'red'
+                    enc_note = 'encrypted' if enc else ('not encrypted' if enc is False else 'encryption unknown')
+                    cloud_cell = (f"<span style=\"color:{cm_color}\">"
+                                  f"{intune.get('compliance_state', 'Unknown')} ({enc_note})</span>")
+                else:
+                    cloud_cell = '<span class="na">No</span>'
                 html += (
                     f"                <tr><td>{ep.hostname}</td><td>{ep.ip_address}</td>"
                     f"<td>{ep.os_version}</td>"
                     f"<td><span style=\"color:{fw_color}\">{ep.firewall_status or 'Unknown'}</span></td>"
                     f"<td><span style=\"color:{av_color}\">{ep.antivirus_status or 'Unknown'}</span></td>"
+                    f"<td>{cloud_cell}</td>"
                     f"</tr>\n"
                 )
             html += "            </table>\n        </div>\n"
@@ -325,10 +373,26 @@ class MSPReportExporter(ExporterBase):
 </html>"""
         return html
 
+    @staticmethod
+    def _intune_signal(ep: Any) -> Dict[str, Any]:
+        """Return this endpoint's Intune metadata regardless of whether it's a
+        pure cloud device or a hybrid device merged with its on-prem record
+        (orchestrator._merge_endpoints nests the Intune data under
+        metadata['intune'] for merges). Returns {} when there's no Intune
+        signal at all, so callers can treat a merged and a standalone Intune
+        device identically without duplicating a check for each shape."""
+        meta = ep.metadata or {}
+        return meta.get('intune') or (meta if meta.get('source') == 'intune' else {})
+
     def _generate_findings(self, artifacts: Any) -> List[Dict[str, str]]:
         findings = []
         onprem_eps = self._onprem_endpoints(artifacts)
         cloud_eps = self._cloud_endpoints(artifacts)
+        # Every device with an Intune signal, whether reported standalone
+        # (cloud_eps) or merged into an on-prem record — so a hybrid device's
+        # non-compliance/encryption status is never silently dropped just
+        # because it's now counted once instead of twice.
+        intune_eps = [ep for ep in artifacts.endpoints if self._intune_signal(ep)]
 
         # On-prem-only checks: cloud endpoints deliberately have these fields
         # set to None (not applicable), so they must never be evaluated here.
@@ -356,8 +420,11 @@ class MSPReportExporter(ExporterBase):
 
         # Cloud-native finding, using the real Intune compliance signal instead
         # of borrowing on-prem checks that don't apply to these devices.
+        # Checked against every device with Intune data (intune_eps), not
+        # just cloud_eps, so a hybrid on-prem+Intune device's non-compliance
+        # still surfaces here even though it's no longer counted separately.
         noncompliant_cloud = [
-            ep.hostname for ep in cloud_eps if not (ep.metadata or {}).get('is_compliant')
+            ep.hostname for ep in intune_eps if not self._intune_signal(ep).get('is_compliant')
         ]
         if noncompliant_cloud:
             findings.append({
@@ -373,10 +440,10 @@ class MSPReportExporter(ExporterBase):
         # verdict — that verdict reflects whatever compliance policy the
         # tenant configured, which may not require encryption at all. Only
         # flag when we affirmatively know it's False (metadata is not None),
-        # never when the value is unknown.
+        # never when the value is unknown. Same intune_eps basis as above.
         unencrypted_cloud = [
-            ep.hostname for ep in cloud_eps
-            if (ep.metadata or {}).get('is_encrypted') is False
+            ep.hostname for ep in intune_eps
+            if self._intune_signal(ep).get('is_encrypted') is False
         ]
         if unencrypted_cloud:
             findings.append({

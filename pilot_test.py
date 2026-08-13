@@ -19,6 +19,15 @@ end-to-end before pointing it at anything real:
 
         set CMMC_DEMO=1   (PowerShell: $env:CMMC_DEMO="1")
         python pilot_test.py
+
+NOTE: ONPREM_PROFILE and CLOUD_PROFILE below are configured as two SEPARATE
+tenant profiles for this pilot, even though they represent the same physical
+machine/organization (Johnny's own laptop, scanned locally and also enrolled
+in Tenguard's Intune). That's fine for testing each plane independently, but
+it means the device de-duplication in orchestrator.py (_merge_endpoints)
+never triggers here — merging only happens WITHIN a single TenantProfile
+that has both planes=[Plane.ONPREM, Plane.CLOUD] configured, which is how a
+real hybrid client would actually be set up in production.
 """
 
 import logging
@@ -92,7 +101,11 @@ def summarize(result):
     print(f"  Policies:        {len(c.policies)}")
     print()
     overall = ComplianceScorer.calculate_overall_score(c)
+    coverage = ComplianceScorer.calculate_coverage(c)
     print(f"  Overall compliance score: {overall}/100")
+    print(f"  Scoring coverage: {coverage['assessed_count']}/{coverage['total_count']} categories "
+          f"({coverage['assessed_weight_pct']}% of scoring weight)"
+          + (" — COVERAGE INCOMPLETE" if coverage['assessed_weight_pct'] < 100 else ""))
     for dim in ('firewall', 'antivirus', 'updates', 'policies', 'event_logging', 'ad_security'):
         method = getattr(ComplianceScorer, f'_score_{dim}')
         val = method(c)
