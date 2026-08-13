@@ -456,12 +456,12 @@ class MSPReportExporter(ExporterBase):
         if cloud_eps and not artifacts.policies:
             notes.append(
                 'Cloud-managed policy configuration (Entra Conditional Access, Intune '
-                'configuration profiles) was not evaluated — this capability is not yet '
+                'configuration profiles) was not evaluated. This capability is not yet '
                 'implemented for the cloud plane.'
             )
         if cloud_eps and not artifacts.security_events:
             notes.append(
-                'Cloud identity sign-in and audit log review was not evaluated — this '
+                'Cloud identity sign-in and audit log review was not evaluated. This '
                 'capability is not yet implemented for the cloud plane.'
             )
         if onprem_eps and not artifacts.policies:
