@@ -52,6 +52,22 @@ misleading full-coverage scores):
     under the score, plus a Scoring Coverage row in the Executive Summary,
     so a score based on only one or two of six categories can never read as
     a fully-assessed tenant.
+
+Further fixes after reviewing the firewall finding and the missing AD data:
+  - "Firewall Not Fully Enabled" now names which specific profile(s)
+    (Domain/Private/Public) are disabled per host, from data the collector
+    already gathers (metadata['firewall_profiles']) but the report wasn't
+    surfacing — "not fully enabled" alone wasn't actionable. Includes a
+    caveat that this reflects the built-in Windows Firewall toggle only; a
+    third-party firewall/EDR product may be intentionally handling blocking
+    instead, and that's a judgment call for whoever reviews the finding.
+  - AD/Entra user and group data was being collected (including the
+    privileged-role and MFA enrichment added earlier) and used only to
+    compute the ad_security score number — never actually shown. Added two
+    new tables (Users, Groups) covering both on-prem AD and Entra shapes,
+    plus two new findings: "Privileged Account Without MFA" (a real,
+    high-severity gap directly implicating IA.L2-3.5.3) and "Stale
+    Privileged Account" (orphaned elevated access).
 """
 
 import logging
@@ -95,6 +111,14 @@ class MSPReportExporter(ExporterBase):
     def _cloud_endpoints(artifacts: Any) -> List:
         return [ep for ep in artifacts.endpoints
                 if ep.firewall_status is None and (ep.metadata or {}).get('source') == 'intune']
+
+    @staticmethod
+    def _ad_users(artifacts: Any) -> List:
+        return [o for o in artifacts.ad_objects if o.object_class == 'user']
+
+    @staticmethod
+    def _ad_groups(artifacts: Any) -> List:
+        return [o for o in artifacts.ad_objects if o.object_class == 'group']
 
     def _generate_msp_report(
         self,
@@ -242,6 +266,8 @@ class MSPReportExporter(ExporterBase):
             for ep in onprem_eps:
                 fw_color = 'green' if ep.firewall_status == 'Enabled' else ('orange' if ep.firewall_status == 'Partial' else 'red')
                 av_color = 'green' if ep.antivirus_status == 'Active' else 'red'
+                disabled_profiles = self._disabled_firewall_profiles(ep)
+                fw_note = f" ({', '.join(disabled_profiles)} disabled)" if disabled_profiles else ""
                 # A device merged from both planes (matched by hostname — see
                 # orchestrator._merge_endpoints) carries its Intune record
                 # under metadata['intune']. Surface that here so the signal
@@ -259,7 +285,7 @@ class MSPReportExporter(ExporterBase):
                 html += (
                     f"                <tr><td>{ep.hostname}</td><td>{ep.ip_address}</td>"
                     f"<td>{ep.os_version}</td>"
-                    f"<td><span style=\"color:{fw_color}\">{ep.firewall_status or 'Unknown'}</span></td>"
+                    f"<td><span style=\"color:{fw_color}\">{ep.firewall_status or 'Unknown'}{fw_note}</span></td>"
                     f"<td><span style=\"color:{av_color}\">{ep.antivirus_status or 'Unknown'}</span></td>"
                     f"<td>{cloud_cell}</td>"
                     f"</tr>\n"
@@ -287,6 +313,101 @@ class MSPReportExporter(ExporterBase):
                     f"<td><span style=\"color:{enc_color}\">{enc}</span></td>"
                     f"<td>{meta.get('management_state', 'Unknown')}</td>"
                     f"<td>{meta.get('owner_upn', 'Unknown')}</td></tr>\n"
+                )
+            html += "            </table>\n        </div>\n"
+
+        ad_users = self._ad_users(artifacts)
+        if ad_users:
+            html += """        <div class="section">
+            <h2>Active Directory / Identity Objects — Users</h2>
+            <table>
+                <tr>
+                    <th>Name</th><th>Source</th><th>Status</th><th>Guest</th>
+                    <th>Stale</th><th>Privileged</th><th>MFA Registered</th>
+                </tr>
+"""
+            for u in ad_users:
+                attrs = u.attributes or {}
+                source = attrs.get('source', 'unknown')
+                is_cloud = source == 'entra'
+                name = attrs.get('displayName') or attrs.get('sAMAccountName') or u.distinguished_name
+
+                if is_cloud:
+                    enabled = attrs.get('accountEnabled')
+                else:
+                    disabled = attrs.get('disabled')
+                    enabled = (not disabled) if disabled is not None else None
+                status_color = 'green' if enabled else ('red' if enabled is False else '#999')
+                status_label = 'Enabled' if enabled else ('Disabled' if enabled is False else 'Unknown')
+
+                is_guest = attrs.get('isGuest')
+                guest_cell = ('Yes' if is_guest else 'No') if is_guest is not None else '<span class="na">N/A</span>'
+
+                stale = attrs.get('isStale')
+                stale_color = 'red' if stale else ('green' if stale is False else '#999')
+                stale_label = 'Yes' if stale else ('No' if stale is False else 'Unknown')
+
+                # Privileged: True/False is a real answer either plane produced;
+                # None means the lookup itself failed/wasn't attempted — shown
+                # as Unknown, never silently rendered as "No".
+                privileged = attrs.get('isPrivileged')
+                roles = attrs.get('privilegedRoles') or []
+                if privileged is True:
+                    priv_color = 'red'
+                    priv_label = 'YES' + (f" ({', '.join(roles)})" if roles else " (privileged AD group)")
+                elif privileged is False:
+                    priv_color, priv_label = 'green', 'No'
+                else:
+                    priv_color, priv_label = '#999', 'Unknown'
+
+                # MFA is a cloud-only concept today — on-prem AD has no MFA
+                # signal, so it's N/A, not a false "No".
+                mfa = attrs.get('isMfaRegistered')
+                methods = attrs.get('mfaMethods') or []
+                if not is_cloud:
+                    mfa_cell = '<span class="na">N/A (on-prem)</span>'
+                elif mfa is True:
+                    method_note = f" ({', '.join(methods)})" if methods else ""
+                    mfa_cell = f'<span style="color:green">Yes{method_note}</span>'
+                elif mfa is False:
+                    mfa_cell = '<span style="color:red">No</span>'
+                else:
+                    mfa_cell = '<span style="color:#999">Unknown</span>'
+
+                html += (
+                    f"                <tr><td>{name}</td><td>{'Entra ID' if is_cloud else 'On-Prem AD'}</td>"
+                    f"<td><span style=\"color:{status_color}\">{status_label}</span></td>"
+                    f"<td>{guest_cell}</td>"
+                    f"<td><span style=\"color:{stale_color}\">{stale_label}</span></td>"
+                    f"<td><span style=\"color:{priv_color}\">{priv_label}</span></td>"
+                    f"<td>{mfa_cell}</td></tr>\n"
+                )
+            html += "            </table>\n        </div>\n"
+
+        ad_groups = self._ad_groups(artifacts)
+        if ad_groups:
+            html += """        <div class="section">
+            <h2>Active Directory / Identity Objects — Groups</h2>
+            <table>
+                <tr><th>Name</th><th>Source</th><th>Description</th><th>Detail</th></tr>
+"""
+            for g in ad_groups:
+                attrs = g.attributes or {}
+                source = attrs.get('source', 'unknown')
+                is_cloud = source == 'entra'
+                name = attrs.get('displayName') or attrs.get('sAMAccountName') or g.distinguished_name
+                desc = attrs.get('description') or '<span class="na">None</span>'
+                if is_cloud:
+                    role_assignable = attrs.get('roleAssignable')
+                    sec_enabled = attrs.get('securityEnabled')
+                    detail = (f"Security-enabled: {'Yes' if sec_enabled else 'No'}; "
+                              f"Role-assignable: {'Yes' if role_assignable else 'No'}")
+                else:
+                    member_count = attrs.get('memberCount')
+                    detail = f"{member_count} member(s)" if member_count is not None else '<span class="na">Unknown</span>'
+                html += (
+                    f"                <tr><td>{name}</td><td>{'Entra ID' if is_cloud else 'On-Prem AD'}</td>"
+                    f"<td>{desc}</td><td>{detail}</td></tr>\n"
                 )
             html += "            </table>\n        </div>\n"
 
@@ -384,6 +505,26 @@ class MSPReportExporter(ExporterBase):
         meta = ep.metadata or {}
         return meta.get('intune') or (meta if meta.get('source') == 'intune' else {})
 
+    @staticmethod
+    def _disabled_firewall_profiles(ep: Any) -> List[str]:
+        """Return which specific Windows Firewall profile(s) (Domain/Private/
+        Public) are disabled on this endpoint, from the per-profile detail
+        the collector already gathers (metadata['firewall_profiles']) but the
+        report wasn't previously surfacing — 'Partial' alone doesn't tell an
+        MSP or client which profile needs attention, or whether it's the
+        Public profile (internet-facing, higher risk) or Domain (usually
+        lower risk on a managed network).
+
+        NOTE: this reflects only the built-in Windows Firewall profile
+        toggle. A profile showing disabled does NOT necessarily mean the
+        machine is unprotected — a third-party firewall/EDR product may be
+        enforcing blocking instead, intentionally with Windows Firewall
+        turned off to avoid rule conflicts. This method can't tell the two
+        apart; that judgment call belongs to whoever reviews the finding.
+        """
+        profiles = (ep.metadata or {}).get('firewall_profiles') or []
+        return [p.get('Name', 'Unknown') for p in profiles if not p.get('Enabled')]
+
     def _generate_findings(self, artifacts: Any) -> List[Dict[str, str]]:
         findings = []
         onprem_eps = self._onprem_endpoints(artifacts)
@@ -400,11 +541,29 @@ class MSPReportExporter(ExporterBase):
             ep.hostname for ep in onprem_eps if ep.firewall_status != "Enabled"
         ]
         if disabled_firewalls:
+            # Per-host detail on WHICH profile(s) are off, not just that the
+            # status is "Partial" — a client/MSP can't act on "not fully
+            # enabled" alone, but "Public profile disabled on ROYEPC" is
+            # actionable (and Public vs. Domain carries very different risk).
+            detail_lines = []
+            for ep in onprem_eps:
+                if ep.firewall_status == "Enabled":
+                    continue
+                disabled_profiles = self._disabled_firewall_profiles(ep)
+                if disabled_profiles:
+                    detail_lines.append(f"{ep.hostname}: {', '.join(disabled_profiles)} profile(s) disabled")
+                else:
+                    detail_lines.append(f"{ep.hostname}: status '{ep.firewall_status}' (profile detail unavailable)")
             findings.append({
                 'title': 'Firewall Not Fully Enabled',
                 'severity': 'Critical',
-                'description': f'Firewall is not fully enabled on: {", ".join(disabled_firewalls)}',
-                'recommendation': 'Enable Windows Firewall on all profiles for all on-prem endpoints',
+                'description': (f'Firewall is not fully enabled on: {", ".join(disabled_firewalls)}. '
+                                 + ' | '.join(detail_lines)),
+                'recommendation': 'Enable Windows Firewall on all profiles for all on-prem endpoints. '
+                                   'NOTE: this reflects the built-in Windows Firewall profile toggle only — '
+                                   'if a third-party firewall or EDR product is intentionally handling '
+                                   'blocking on the affected profile(s), confirm that before remediating, '
+                                   'rather than assuming the device is unprotected.',
             })
 
         inactive_av = [
@@ -416,6 +575,53 @@ class MSPReportExporter(ExporterBase):
                 'severity': 'Critical',
                 'description': f'Antivirus is inactive on: {", ".join(inactive_av)}',
                 'recommendation': 'Deploy and activate antivirus protection on all on-prem endpoints',
+            })
+
+        # Identity findings: privileged-account and MFA data was collected
+        # specifically to satisfy IA.L2-3.5.3's evidence requirement
+        # ("privileged accounts are identified"), but until now it only fed
+        # the ad_security score number — it was never surfaced as an actual
+        # finding. A privileged account without MFA is a real, high-severity
+        # gap on its own, independent of the overall AD/identity score.
+        ad_users = self._ad_users(artifacts)
+        privileged_no_mfa = [
+            (u.attributes or {}).get('displayName') or (u.attributes or {}).get('sAMAccountName') or u.distinguished_name
+            for u in ad_users
+            if (u.attributes or {}).get('isPrivileged') is True
+            and (u.attributes or {}).get('isMfaRegistered') is False
+        ]
+        if privileged_no_mfa:
+            findings.append({
+                'title': 'Privileged Account Without MFA',
+                'severity': 'Critical',
+                'description': f'The following privileged accounts do not have MFA registered: '
+                                f'{", ".join(privileged_no_mfa)}',
+                'recommendation': 'Enforce MFA registration for all privileged accounts immediately '
+                                   '(Conditional Access policy for Entra, or a compensating on-prem '
+                                   'control). A privileged account without MFA is one of the highest-'
+                                   'value targets for compromise and directly implicates IA.L2-3.5.3.',
+            })
+
+        # Stale accounts still holding privileged roles — the isStale flag
+        # alone is scored, but a privileged + stale combination is worth its
+        # own finding: it means someone with elevated access hasn't signed
+        # in recently, which is exactly the kind of orphaned-access risk
+        # CMMC account-management controls are meant to catch.
+        stale_privileged = [
+            (u.attributes or {}).get('displayName') or (u.attributes or {}).get('sAMAccountName') or u.distinguished_name
+            for u in ad_users
+            if (u.attributes or {}).get('isPrivileged') is True
+            and (u.attributes or {}).get('isStale') is True
+        ]
+        if stale_privileged:
+            findings.append({
+                'title': 'Stale Privileged Account',
+                'severity': 'High',
+                'description': f'The following privileged accounts have not signed in recently: '
+                                f'{", ".join(stale_privileged)}',
+                'recommendation': 'Review whether these privileged accounts are still needed. If not, '
+                                   'disable or remove them. If needed but inactive, confirm the account '
+                                   'is not orphaned from a departed employee or unused service account.',
             })
 
         # Cloud-native finding, using the real Intune compliance signal instead
