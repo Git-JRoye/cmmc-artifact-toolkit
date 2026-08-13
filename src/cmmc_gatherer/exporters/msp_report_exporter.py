@@ -21,6 +21,21 @@ collected data:
     ambiguous warning color.
   - Assessment Scope section describes only the plane(s) actually present in
     the data, instead of always describing an on-prem/AD engagement.
+
+Further fixes after reviewing real generated reports:
+  - Device encryption is now checked directly against metadata['is_encrypted']
+    for cloud endpoints, independent of Intune's own 'compliant' verdict —
+    that verdict reflects whatever compliance policy the tenant configured,
+    which may not require encryption at all, so relying on it alone silently
+    missed real unencrypted devices.
+  - A "Coverage Notes" section now discloses when an entire category
+    (policies or security events) has zero data for a plane that's actually
+    present, so a clean score can't read as "everything was checked" when
+    large categories were never assessed (this is currently the case for the
+    cloud plane — there is no cloud policy or event collector yet).
+  - Failing policies are now grouped into separate findings by policy_type
+    instead of one undifferentiated comma-separated list mixing e.g.
+    password-policy failures with two dozen individual audit subcategories.
 """
 
 import logging
@@ -75,6 +90,21 @@ class MSPReportExporter(ExporterBase):
         findings = self._generate_findings(artifacts)
         onprem_eps = self._onprem_endpoints(artifacts)
         cloud_eps = self._cloud_endpoints(artifacts)
+
+        coverage_notes = self._generate_coverage_notes(artifacts, onprem_eps, cloud_eps)
+        coverage_notes_html = ""
+        if coverage_notes:
+            notes_items = "\n".join(f"                <li>{note}</li>" for note in coverage_notes)
+            coverage_notes_html = f"""
+        <div class="section">
+            <h2>Coverage Notes</h2>
+            <div class="recommendation">
+                <strong>The following was NOT evaluated in this assessment:</strong>
+                <ul>
+{notes_items}
+                </ul>
+            </div>
+        </div>"""
 
         customer_name = customer_name or "Unnamed Customer"
         assessment_id = assessment_id or "CMMC-" + datetime.now().strftime("%Y%m%d%H%M%S")
@@ -164,6 +194,7 @@ class MSPReportExporter(ExporterBase):
                 <tr><td>Security Events Analyzed</td><td>{len(artifacts.security_events)}</td></tr>
             </table>
         </div>
+{coverage_notes_html}
 """
 
         if onprem_eps:
@@ -338,21 +369,69 @@ class MSPReportExporter(ExporterBase):
                                    'and remediate (encryption, OS version, or configuration drift).',
             })
 
+        # Encryption checked directly, independent of Intune's own 'compliant'
+        # verdict — that verdict reflects whatever compliance policy the
+        # tenant configured, which may not require encryption at all. Only
+        # flag when we affirmatively know it's False (metadata is not None),
+        # never when the value is unknown.
+        unencrypted_cloud = [
+            ep.hostname for ep in cloud_eps
+            if (ep.metadata or {}).get('is_encrypted') is False
+        ]
+        if unencrypted_cloud:
+            findings.append({
+                'title': 'Device Not Encrypted',
+                'severity': 'Critical',
+                'description': f'The following managed devices are not encrypted: '
+                                f'{", ".join(unencrypted_cloud)}',
+                'recommendation': 'Enable BitLocker (or platform-equivalent encryption) via an '
+                                   'Intune disk encryption policy. Data at rest on unencrypted '
+                                   'devices is a direct risk to CUI protection requirements, '
+                                   'regardless of the device\'s overall Intune compliance state.',
+            })
+
         # Policy findings reuse the same pass/fail rules as the scorer, so an
         # inverted setting (e.g. ClearTextPassword should be Disabled) is
         # judged correctly instead of a blind status == "Disabled" check.
-        failing_policies = [
-            p.policy_name for p in artifacts.policies
-            if ComplianceScorer._policy_passes(p) is False
-        ]
-        if failing_policies:
+        # Grouped by policy_type instead of one flat list, so a report
+        # doesn't mix e.g. password-policy failures with two dozen individual
+        # audit subcategories in a single unreadable blob.
+        failing_by_type: Dict[str, List[str]] = {}
+        for p in artifacts.policies:
+            if ComplianceScorer._policy_passes(p) is False:
+                failing_by_type.setdefault(p.policy_type, []).append(p.policy_name)
+
+        type_config = {
+            'Local Security Policy': (
+                'Password & Account Lockout Policy Below Baseline', 'High',
+                'Review and strengthen password and account lockout settings via Local '
+                'Security Policy or Group Policy.',
+            ),
+            'UAC (Local Policy)': (
+                'UAC Settings Below Baseline', 'High',
+                'Review User Account Control settings via Local Security Policy or Group Policy.',
+            ),
+            'Audit Policy': (
+                None, 'High',  # title built dynamically below with the real count
+                'Enable auditing for these subcategories via auditpol or Group Policy '
+                '(Advanced Audit Policy Configuration). Comprehensive audit logging is '
+                'directly relevant to the Audit and Accountability (AU) CMMC practice family.',
+            ),
+        }
+        for policy_type, names in failing_by_type.items():
+            title, severity, recommendation = type_config.get(
+                policy_type,
+                (f'{policy_type} Settings Below Baseline', 'High',
+                 'Review and remediate these settings via Group Policy or local security policy.'),
+            )
+            if policy_type == 'Audit Policy':
+                title = f'Audit Policy: {len(names)} Categor{"y" if len(names) == 1 else "ies"} Not Logging'
             findings.append({
-                'title': 'Security Policy Settings Below Recommended Baseline',
-                'severity': 'High',
+                'title': title,
+                'severity': severity,
                 'description': f'The following settings do not meet the recommended baseline: '
-                                f'{", ".join(failing_policies)}',
-                'recommendation': 'Review and remediate these settings via Group Policy or local '
-                                   'security policy.',
+                                f'{", ".join(names)}',
+                'recommendation': recommendation,
             })
 
         if not findings:
@@ -364,3 +443,36 @@ class MSPReportExporter(ExporterBase):
             })
 
         return findings
+
+    @staticmethod
+    def _generate_coverage_notes(artifacts: Any, onprem_eps: List, cloud_eps: List) -> List[str]:
+        """Disclose categories with zero data for a plane that's actually
+        present, so a clean score never reads as 'everything was checked'
+        when large categories were never assessed. Returns an empty list
+        when there's nothing to disclose (e.g. a plane with real, present
+        policy/event data, or a plane not run at all)."""
+        notes = []
+
+        if cloud_eps and not artifacts.policies:
+            notes.append(
+                'Cloud-managed policy configuration (Entra Conditional Access, Intune '
+                'configuration profiles) was not evaluated — this capability is not yet '
+                'implemented for the cloud plane.'
+            )
+        if cloud_eps and not artifacts.security_events:
+            notes.append(
+                'Cloud identity sign-in and audit log review was not evaluated — this '
+                'capability is not yet implemented for the cloud plane.'
+            )
+        if onprem_eps and not artifacts.policies:
+            notes.append(
+                'On-prem security policy data was not available for this assessment '
+                '(no records were returned by the collector).'
+            )
+        if onprem_eps and not artifacts.security_events:
+            notes.append(
+                'On-prem security event log data was not available for this assessment '
+                '(no records were returned by the collector).'
+            )
+
+        return notes
