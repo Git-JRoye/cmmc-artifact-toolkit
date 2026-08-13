@@ -28,7 +28,7 @@ isn't penalized for a metric that doesn't apply to them.
 """
 
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from ..models.artifacts import ADObject, ArtifactCollection, Policy
 
@@ -48,9 +48,11 @@ class ComplianceScorer:
     }
 
     @classmethod
-    def calculate_overall_score(cls, artifacts: ArtifactCollection) -> int:
-        """Return a 0-100 compliance score, weighted across applicable dimensions only."""
-        results = {
+    def _all_dimension_scores(cls, artifacts: ArtifactCollection) -> Dict[str, Optional[int]]:
+        """Single source of truth for the six per-dimension scores, shared by
+        calculate_overall_score and calculate_coverage so they can never
+        silently disagree about which dimensions had data."""
+        return {
             'firewall': cls._score_firewall(artifacts),
             'antivirus': cls._score_antivirus(artifacts),
             'updates': cls._score_updates(artifacts),
@@ -58,6 +60,20 @@ class ComplianceScorer:
             'event_logging': cls._score_event_logging(artifacts),
             'ad_security': cls._score_ad_security(artifacts),
         }
+
+    @classmethod
+    def calculate_overall_score(cls, artifacts: ArtifactCollection) -> int:
+        """Return a 0-100 compliance score, weighted across applicable dimensions only.
+
+        NOTE: this renormalizes across only the dimensions that had data, so
+        a tenant assessed on just one or two dimensions can still show a high
+        score even though most of the framework wasn't evaluated. That's
+        correct behavior for the score itself (guessing at missing data would
+        be worse), but it means the score alone doesn't communicate how much
+        of the assessment is actually covered — pair it with
+        calculate_coverage() wherever this score is displayed.
+        """
+        results = cls._all_dimension_scores(artifacts)
         applicable = {k: v for k, v in results.items() if v is not None}
         if not applicable:
             logger.warning("No scoreable dimensions had applicable data — returning 0")
@@ -67,6 +83,28 @@ class ComplianceScorer:
         weight_total = sum(cls.SCORE_WEIGHTS[k] for k in applicable)
         score = (weighted_sum / weight_total) * 100
         return int(max(0, min(100, score)))
+
+    @classmethod
+    def calculate_coverage(cls, artifacts: ArtifactCollection) -> Dict[str, Any]:
+        """Report how much of the six-dimension framework was actually
+        assessed, so a clean score can't be mistaken for a fully-assessed
+        tenant. Coverage is weight-based, not a flat category count — an
+        assessment missing two 15-point dimensions is materially different
+        from one missing the 20-point ad_security dimension, even though
+        both are "missing 2 of 6" by count.
+        """
+        results = cls._all_dimension_scores(artifacts)
+        assessed = [k for k, v in results.items() if v is not None]
+        missing = [k for k, v in results.items() if v is None]
+        total_weight = sum(cls.SCORE_WEIGHTS.values())
+        assessed_weight = sum(cls.SCORE_WEIGHTS[k] for k in assessed)
+        return {
+            'assessed_dimensions': assessed,
+            'missing_dimensions': missing,
+            'assessed_count': len(assessed),
+            'total_count': len(results),
+            'assessed_weight_pct': int(round((assessed_weight / total_weight) * 100)),
+        }
 
     # -- endpoint dimensions (on-prem only — see module docstring) -----------
 

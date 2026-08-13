@@ -73,12 +73,13 @@ class TenantOrchestrator:
     def run_one(self, profile: TenantProfile) -> TenantRunResult:
         """Run whichever plane(s) this tenant is configured for."""
         errors: List[str] = []
-        endpoints, ad_objects, events, policies = [], [], [], []
+        onprem_endpoints, cloud_endpoints = [], []
+        ad_objects, events, policies = [], [], []
 
         if profile.runs_onprem():
             try:
                 ep, ad, ev, po = self._run_onprem(profile)
-                endpoints += ep
+                onprem_endpoints += ep
                 ad_objects += ad
                 events += ev
                 policies += po
@@ -89,12 +90,21 @@ class TenantOrchestrator:
         if profile.runs_cloud():
             try:
                 ep, ad, cloud_errors = self._run_cloud(profile)
-                endpoints += ep       # Intune devices, mapped to Endpoint
-                ad_objects += ad      # Entra users/groups, mapped to ADObject
+                cloud_endpoints += ep  # Intune devices, mapped to Endpoint
+                ad_objects += ad       # Entra users/groups, mapped to ADObject
                 errors += cloud_errors
             except Exception as e:
                 logger.error("[%s] cloud plane failed: %s", profile.tenant_key, e)
                 errors.append(f"cloud: {e}")
+
+        endpoints = self._merge_endpoints(onprem_endpoints, cloud_endpoints)
+        merged_count = len(onprem_endpoints) + len(cloud_endpoints) - len(endpoints)
+        if merged_count:
+            logger.info(
+                "[%s] merged %d hybrid-managed device(s) (matched by hostname across "
+                "on-prem + Intune) so they aren't double-counted as separate endpoints",
+                profile.tenant_key, merged_count,
+            )
 
         collection = ArtifactCollection(
             endpoints=endpoints,
@@ -114,6 +124,68 @@ class TenantOrchestrator:
             collection=collection,
             errors=errors,
         )
+
+    # -- device de-duplication -----------------------------------------------
+
+    @staticmethod
+    def _merge_endpoints(onprem: List, cloud: List) -> List:
+        """Merge on-prem and Intune endpoint records describing the SAME
+        physical machine, so a hybrid-managed device (locally scanned AND
+        Intune-enrolled) isn't reported/scored as two separate endpoints.
+
+        Match key: hostname, case-insensitive exact match — the one
+        identifier both planes reliably produce today. KNOWN LIMITATION:
+        this will mis-merge two genuinely different machines that happen to
+        share a hostname, and will miss a real match if a device was renamed
+        between the two collections. A serial-number match would be more
+        robust once the on-prem collector captures one; flagged here rather
+        than silently assumed to be perfect.
+
+        The merged record keeps the on-prem fields that scoring actually
+        reads (firewall_status, antivirus_status, installed_updates) — those
+        only ever come from on-prem collection — and folds the Intune record
+        into metadata['intune'] so compliance state, encryption, and
+        management state are preserved for reporting rather than discarded.
+        """
+        from .models.artifacts import Endpoint
+
+        cloud_by_host: Dict[str, List] = {}
+        for ep in cloud:
+            key = (ep.hostname or "").strip().upper()
+            if key:
+                cloud_by_host.setdefault(key, []).append(ep)
+
+        merged: List = []
+        used_cloud_ids = set()
+
+        for ep in onprem:
+            key = (ep.hostname or "").strip().upper()
+            matches = cloud_by_host.get(key, [])
+            if not matches:
+                merged.append(ep)
+                continue
+
+            cloud_ep = matches[0]  # multiple Intune records for one hostname would be unusual
+            used_cloud_ids.add(id(cloud_ep))
+            combined_metadata = dict(ep.metadata or {})
+            combined_metadata["sources"] = ["onprem", "intune"]
+            combined_metadata["intune"] = dict(cloud_ep.metadata or {})
+            merged.append(Endpoint(
+                hostname=ep.hostname,
+                ip_address=ep.ip_address,
+                os_version=ep.os_version,
+                installed_updates=ep.installed_updates,
+                security_products=ep.security_products,
+                firewall_status=ep.firewall_status,
+                antivirus_status=ep.antivirus_status,
+                metadata=combined_metadata,
+            ))
+
+        for ep in cloud:
+            if id(ep) not in used_cloud_ids:
+                merged.append(ep)
+
+        return merged
 
     # -- plane runners ------------------------------------------------------
 
