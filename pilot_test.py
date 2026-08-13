@@ -40,6 +40,7 @@ from cmmc_gatherer.cloud.cloud_config import (  # noqa: E402
 )
 from cmmc_gatherer.onprem.domain_config import DomainConfig  # noqa: E402
 from cmmc_gatherer.orchestrator import TenantOrchestrator  # noqa: E402
+from cmmc_gatherer.utils.compliance import ComplianceScorer  # noqa: E402
 
 
 def pilot_secret_resolver(secret_ref: str) -> str:
@@ -95,6 +96,14 @@ def summarize(result):
     print(f"  AD/identity obj: {len(c.ad_objects)}")
     print(f"  Security events: {len(c.security_events)}")
     print(f"  Policies:        {len(c.policies)}")
+    print()
+    overall = ComplianceScorer.calculate_overall_score(c)
+    print(f"  Overall compliance score: {overall}/100")
+    for dim in ('firewall', 'antivirus', 'updates', 'policies', 'event_logging', 'ad_security'):
+        method = getattr(ComplianceScorer, f'_score_{dim}')
+        val = method(c)
+        shown = f"{val}/100" if val is not None else "N/A (no applicable data)"
+        print(f"    {dim:15s}: {shown}")
     if result.errors:
         print(f"  ERRORS ({len(result.errors)}):")
         for e in result.errors:
