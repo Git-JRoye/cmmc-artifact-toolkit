@@ -1,214 +1,113 @@
-# CMMC Artifact Gathering Tool
+# CMMC Artifact Toolkit
 
-> **Built for MSPs. Ready for auditors.**
-> Collect Windows compliance artifacts from every endpoint, score your security posture, and deliver a professional client report — without touching a spreadsheet.
+Evidence collection and CMMC/NIST SP 800-171 compliance scoring for Windows, Active Directory, Entra ID, and Intune environments.
 
----
+This toolkit gathers the artifacts an assessor actually asks for — endpoint security posture, identity and directory state, device compliance, security event history, and policy configuration — and scores them against CMMC practices, instead of someone manually logging into machines, running PowerShell by hand, and pasting output into a spreadsheet.
 
-## Why This Exists
+It's built to be useful in two settings that need the same underlying data for different reasons:
 
-When a DoD contractor asks their MSP "are we compliant?", the answer usually involves someone manually logging into machines, running PowerShell commands, copying output into a Word doc, and hoping nothing was missed.
+MSPs / MSSPs assessing multiple client environments and producing client-ready compliance reports.
+OSA (Organization Seeking Assessment) engineering teams running continuous internal evidence collection ahead of a C3PAO assessment, or maintaining a defensible SPRS score between annual affirmations.
 
-This tool automates that entire evidence-gathering process. Point it at a Windows environment and it pulls endpoint security posture, Active Directory configuration, security event logs, and Group Policy — then scores everything and produces a client-ready report your customer can actually hand to an auditor.
+The architecture supports both: a single-tenant OSA just configures one profile; an MSP configures one per client.
 
----
+Status — read this before relying on anything here
 
-## What It Does
+This project is under active restructuring. Be precise about what's real:
 
-| Feature | Details |
-|---|---|
-| **Endpoint Collection** | OS version, patch level, installed KB numbers, Windows Defender status, firewall state, security products |
-| **Active Directory** | Users, groups, computers, group memberships, stale objects, privileged account inventory |
-| **Event Log Collection** | Windows Security Event Log — logon events, account changes, privilege use, policy changes |
-| **Policy Collection** | Group Policy Objects, local security policies, account lockout, password policy, UAC |
-| **Compliance Scoring** | Weighted 0–100 score across firewall, AV, patching, policies, event logging, and AD security |
-| **MSP Report** | Professional HTML report with executive summary, findings, color-coded status, and recommendations |
-| **Multi-Tenant** | Manage assessments for multiple customers in one session, score them all at once |
-| **Data Filtering** | Strip PII and sensitive fields before sharing data with third parties or auditors |
-| **5 Export Formats** | JSON, CSV, XML, HTML, and the MSP-grade compliance report |
+Component	Status
+On-prem endpoint collector (OS, patches, Defender, firewall)	✅ Real — PowerShell-backed, live data
+Entra ID identity collector (users, groups, guests, stale accounts)	✅ Real — Microsoft Graph
+Intune device collector (compliance, encryption, management state)	✅ Real — Microsoft Graph
+Per-tenant orchestrator (runs the right plane per client)	✅ Real
+National-cloud support (commercial / GCC / GCC High / DoD)	✅ Real for app-registration auth; GDAP and interactive auth are unimplemented seams
+On-prem AD, event log, and policy collectors	⚠️ Still demo data — not yet rebuilt
+Compliance scoring	⚠️ Placeholder heuristics — not yet mapped to real 800-171 practices or SPRS methodology
+SSP / POA&M generation	❌ Not started
 
----
+Do not use this to make a real compliance claim yet. The collection layer is being built out module by module; scoring in particular needs a full rework before its output means anything to an assessor. See CMMC-TOOL-BUILD-PLAN.md for the phased roadmap.
 
-## The Output
+Architecture
 
-```python
-from cmmc_gatherer import CMMCGatherer
+Two collection planes feed the same artifact models, scorer, and exporters — each tenant runs whichever plane(s) apply to their environment.
 
-gatherer = CMMCGatherer()
-gatherer.collect_all()
-gatherer.export('msp_report', 'acme_corp_report.html',
-                customer_name='Acme Corp',
-                assessment_id='CMMC-2026-001')
-```
+src/cmmc_gatherer/
+├── collectors/
+│   ├── base.py                    # shared CollectorBase interface
+│   ├── onprem/                    # Windows / on-prem AD plane
+│   │   ├── endpoint_collector.py  # + collect_endpoint.ps1
+│   │   ├── ad_collector.py
+│   │   ├── event_log_collector.py
+│   │   └── policy_collector.py
+│   └── cloud/                     # Entra ID / Intune plane
+│       ├── entra_identity_collector.py
+│       └── intune_device_collector.py
+├── cloud/
+│   ├── cloud_config.py            # national-cloud registry + TenantProfile
+│   └── graph.py                   # Graph auth providers + paged client
+├── models/artifacts.py            # shared artifact types (Endpoint, ADObject, ...)
+├── utils/                         # scoring, PII filtering, multi-tenant management
+├── exporters/                     # JSON / CSV / XML / HTML / MSP report
+├── orchestrator.py                # per-tenant: picks plane(s), runs collectors
+└── gatherer.py                    # top-level entry point
 
-That produces a professional HTML report with:
+Why two planes, one model set: an on-prem endpoint and an Intune-managed device don't expose the same fields — a centrally managed device has no local firewall-profile concept, for instance. Rather than force a fit, cloud collectors map what genuinely translates and put the rest in metadata, so nothing is silently fabricated to make the schema line up.
 
-- **Executive summary** — compliance score, assessment date, customer info
-- **Infrastructure overview** — endpoint count, AD objects, policies assessed, events analyzed
-- **Endpoint status table** — firewall and AV status per machine, color-coded
-- **Findings & recommendations** — every gap flagged with a specific remediation step
-- **Policy compliance matrix** — every policy evaluated, enabled/disabled status highlighted
-- **Audit-ready metadata** — assessment ID, date, scope, and disclaimer
+Multi-cloud by design: cloud/cloud_config.py holds a small registry mapping each national cloud (commercial, GCC, GCC High, DoD) to its correct Microsoft Graph endpoint and login authority. A TenantProfile declares which cloud a client is in; the Graph client and auth provider read that and target the right endpoint automatically — commercial and GCC High are both just configuration, not separate code paths.
 
----
+Getting started
+bash
+pip install -r requirements.txt
 
-## Time Savings
+Requires Python 3.8+. On-prem collection requires PowerShell 5.1+ on the target Windows host. Cloud collection requires an Entra app registration in the tenant's own national cloud (a commercial app registration cannot authenticate a GCC High tenant) with admin-consented Graph permissions: User.Read.All, Group.Read.All, AuditLog.Read.All, DeviceManagementManagedDevices.Read.All.
 
-| Task | Manual Approach | This Tool |
-|---|---|---|
-| Inventory endpoints + security status | 30–60 min per site | Seconds |
-| Pull AD user and group data | 1–2 hours | Seconds |
-| Review event logs for red flags | Half a day | Seconds |
-| Check Group Policy compliance | 1–2 hours | Seconds |
-| Write up findings in a report | 2–4 hours | Auto-generated |
-| **Total per client assessment** | **~1–2 days** | **Under a minute** |
+Run the on-prem endpoint collector locally:
 
-For an MSP with 10 clients on quarterly review cycles, that's weeks of billable time you're either recovering or reinvesting.
+python
+from cmmc_gatherer.collectors.onprem.endpoint_collector import EndpointCollector
 
----
+# demo=True returns canned data with no Windows host required — useful for
+# exercising the pipeline before pointing it at a real machine.
+endpoints = EndpointCollector(demo=True).collect()
 
-## Installation
+Run a full per-tenant collection (on-prem + cloud, mixed):
 
-```bash
-git clone https://github.com/tkhemraj/cmmc.git
-cd cmmc
-pip install -e .
-```
+python
+from cmmc_gatherer.cloud.cloud_config import TenantProfile, NationalCloud, Plane, AuthMethod
+from cmmc_gatherer.orchestrator import TenantOrchestrator
 
-Requires Python 3.8+. No external dependencies beyond the standard library.
+def get_secret(secret_ref: str) -> str:
+    # Look this up in your own vault/secret store — never hardcode it here.
+    ...
 
----
+profile = TenantProfile(
+    tenant_key="acme",
+    display_name="Acme Corp",
+    national_cloud=NationalCloud.GCC_HIGH,
+    planes=[Plane.CLOUD],
+    auth_method=AuthMethod.APP_REGISTRATION,
+    tenant_id="<entra-tenant-guid>",
+    client_id="<app-registration-client-id>",
+    secret_ref="acme-graph-client-secret",
+)
 
-## Usage
+orchestrator = TenantOrchestrator(secret_resolver=get_secret)
+result = orchestrator.run_one(profile)
+print(result.collection, result.errors)
+Regulatory accuracy — a standing caution
 
-### Basic — collect everything and export
-```bash
-cmmc-gatherer collect --format msp_report --output report.html
-```
+CMMC levels, the 800-171 revision in force, and SPRS scoring weights change over time and are not hardcoded in this codebase for that reason — treat any control list or weight as external, versioned configuration once the scoring rework lands, and verify current requirements against official DoD/CMMC sources before relying on a score for an actual assessment.
 
-### Generate a named client report
-```bash
-cmmc-gatherer report --customer "Acme Corp" --format html \
-  --assessment-id CMMC-2026-001 --output acme_report.html
-```
+Collected evidence (AD/Entra inventory, event history, policy state) should itself be treated as sensitive (CUI/FCI-adjacent) in storage and transport, not as casual JSON on disk.
 
-### Re-export saved artifacts in any format
-```bash
-cmmc-gatherer export --input artifacts.json \
-  --formats json,csv,html --output-dir ./reports/
-```
+Roadmap
 
-### From Python — full control
-```python
-from cmmc_gatherer import CMMCGatherer
-from cmmc_gatherer.utils import ComplianceScorer, DataFilter
+See CMMC-TOOL-BUILD-PLAN.md for the full phased plan — remaining on-prem collectors, real 800-171 scoring, SSP/POA&M generation, and multi-tenant hardening.
 
-gatherer = CMMCGatherer()
-artifacts = gatherer.collect_all()
+Credit
 
-# Score the environment
-score = ComplianceScorer.calculate_overall_score(artifacts)
-print(f"Compliance score: {score}/100")
+Forked from tkhemraj/cmmc by Tarique Khemraj, which provided the original collector/model/exporter architecture. This fork rebuilds the collection and scoring engine and adds a cloud (Entra ID / Intune) collection plane alongside the original Windows/AD focus.
 
-# Strip PII before sharing with a third party
-clean = DataFilter.filter_for_third_party(artifacts, exclude_user_data=True)
+License
 
-# Export all formats at once
-gatherer.export_multiple(['json', 'csv', 'html'], './reports/')
-```
-
-### Multi-tenant — score all your clients at once
-```python
-from cmmc_gatherer.utils import TenantManager
-
-manager = TenantManager()
-
-for customer in ['acme', 'globex', 'initech']:
-    gatherer = CMMCGatherer()
-    artifacts = gatherer.collect_all()
-    manager.add_tenant(customer, artifacts)
-
-# Compliance scores for every client in one call
-scores = manager.calculate_tenant_scores()
-# {'acme': 87, 'globex': 74, 'initech': 91}
-```
-
----
-
-## Architecture
-
-### Collectors
-Each collector handles one data source and returns typed artifacts:
-
-| Collector | Data Source | What It Captures |
-|---|---|---|
-| `EndpointCollector` | WMI / Windows Security Center | OS, patches, Defender, firewall |
-| `ActiveDirectoryCollector` | LDAP / Domain Controller | Users, groups, computers, memberships |
-| `EventLogCollector` | Windows Security Event Log | Logon events, account changes, privilege use |
-| `PolicyCollector` | Group Policy / Registry | GPOs, local policies, security settings |
-
-### Exporters
-| Format | Use Case |
-|---|---|
-| `json` | SIEM ingestion, database storage, programmatic analysis |
-| `csv` | Excel pivot tables, filtering, stakeholder sharing |
-| `xml` | Enterprise tool integration, structured data |
-| `html` | Internal compliance reporting |
-| `msp_report` | Client-facing professional compliance report |
-
-### Utilities
-- **`ComplianceScorer`** — weighted scoring across 6 security dimensions
-- **`DataFilter`** — PII redaction and sensitivity filtering for third-party sharing
-- **`TenantManager`** — multi-client artifact storage and batch scoring
-- **`ReportBuilder`** — executive summary and recommendation generation
-
----
-
-## Compliance Coverage
-
-This tool gathers evidence relevant to Windows-based controls across:
-
-- **Access Control (AC)** — account restrictions, session policies, remote access
-- **Identification & Authentication (IA)** — account inventory, auth configuration
-- **System & Info Integrity (SI)** — AV, patching, update status
-- **Audit & Accountability (AU)** — event logging, log configuration
-- **Configuration Management (CM)** — policy baselines, Group Policy
-- **System & Communications (SC)** — firewall, network security posture
-
----
-
-## Looking for Full CMMC 2.0 Assessment?
-
-This tool handles artifact collection and scoring for Windows environments. If you need a complete **CMMC 2.0 compliance assessment** — covering all 110 NIST SP 800-171 practices, SPRS score calculation, and POAM generation — check out the companion tool:
-
-**[cmmc2 — CMMC 2.0 Full Assessment Tool](https://github.com/tkhemraj/cmmc2)**
-
----
-
-## Need Help Implementing This For Your Clients?
-
-The tool automates the collection. The compliance work — remediation, documentation, audit prep — is where most organizations get stuck.
-
-**Tarique Khemraj** is an MSP compliance specialist helping defense contractors navigate CMMC from initial posture assessment through certification.
-
-**What I can help with:**
-- Deploying this tool against your actual client environments
-- Interpreting results and prioritizing remediation
-- Building out the documentation your auditors need (SSP, POAM, policies)
-- Managing CMMC compliance programs across your entire client base
-- Preparing for C3PAO third-party assessment
-
-📧 **t.khemraj@gmail.com**
-🐙 **github.com/tkhemraj**
-
-> If you're an MSP with DoD contractor clients and need someone who's already built the tooling and knows the framework — let's talk.
-
----
-
-## License
-
-MIT — use it, fork it, build on it.
-
----
-
-*Windows endpoint compliance artifact collection. Built for MSPs managing DoD contractors.*
+MIT — see LICENSE.
