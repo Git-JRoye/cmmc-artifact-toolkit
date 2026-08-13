@@ -44,6 +44,11 @@ _COMPUTER_ATTRS = [
     "userAccountControl", "whenChanged", "lastLogonTimestamp", "memberOf",
 ]
 
+_PRIVILEGED_GROUP_NAMES = (
+    "Domain Admins", "Enterprise Admins", "Schema Admins", "Administrators",
+    "Account Operators", "Backup Operators", "Server Operators", "Print Operators",
+)
+
 
 class ActiveDirectoryCollector(CollectorBase):
     """Collects AD users, groups, and computers via direct LDAP queries."""
@@ -103,6 +108,7 @@ class ActiveDirectoryCollector(CollectorBase):
                     "isStale": stale,
                     "whenCreated": str(self._attr(entry, "whenCreated") or ""),
                     "description": str(self._attr(entry, "description") or ""),
+                    "isPrivileged": self._is_privileged(self._attr_list(entry, "memberOf")),
                     "source": "onprem_ad",
                 },
                 group_memberships=self._attr_list(entry, "memberOf"),
@@ -182,6 +188,20 @@ class ActiveDirectoryCollector(CollectorBase):
             return int(val)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _is_privileged(group_memberships: List[str]) -> bool:
+        """Flag membership in a well-known privileged AD group.
+
+        Pure post-processing of memberOf DNs we already collect — no
+        additional LDAP query needed. Matches on "CN=<name>," within each DN,
+        case-insensitive.
+        """
+        for dn in group_memberships:
+            for name in _PRIVILEGED_GROUP_NAMES:
+                if f"cn={name.lower()}," in dn.lower():
+                    return True
+        return False
 
     @staticmethod
     def _filetime_to_dt(filetime: Optional[int]) -> Optional[datetime]:
