@@ -138,5 +138,6 @@ reports/
 *.csv
 *.xml
 config.yaml
+tenants.yaml
 report_*.html
 *.cfg

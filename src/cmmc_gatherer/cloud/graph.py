@@ -43,6 +43,32 @@ class AppRegistrationAuth(GraphAuthProvider):
     tenant) with application Graph permissions such as User.Read.All,
     Group.Read.All, Directory.Read.All, AuditLog.Read.All,
     DeviceManagementManagedDevices.Read.All — admin-consented in each tenant.
+
+    Two ways to set this up across multiple clients:
+
+    - One app registration PER client ("Accounts in this organizational
+      directory only" / single-tenant). Simple to reason about, but doesn't
+      scale well past a handful of clients — every new client is a new app
+      registration to create and track.
+
+    - ONE multi-tenant app registration ("Accounts in any organizational
+      directory") shared across many clients — the MSP-scale pattern. A new
+      client just visits
+      https://login.microsoftonline.com/{their-tenant-id}/adminconsent?client_id={your-app-id}
+      and approves your requested permissions for their own tenant; no app
+      registration on their end. Every such client then reuses the SAME
+      client_id/secret_ref in their TenantProfile — only tenant_id differs.
+      See tenants.example.yaml's Example 4 for the config shape this
+      produces. Nothing in this class or in TenantProfile requires
+      client_id to be unique per tenant, so this "just works" today.
+
+    HARD LIMIT either way: this only reaches tenants in the SAME national
+    cloud as the app registration. A multi-tenant app in the commercial
+    cloud (GCC rides commercial, so this covers GCC too) can never reach a
+    GCC High or DoD tenant — those are a separate Entra namespace with their
+    own login/graph hosts (see cloud_config.py's NATIONAL_CLOUDS). A GCC
+    High or DoD client always needs its own app registration created inside
+    that specific cloud, regardless of which pattern you use elsewhere.
     """
 
     def __init__(self, secret_resolver: SecretResolver):
