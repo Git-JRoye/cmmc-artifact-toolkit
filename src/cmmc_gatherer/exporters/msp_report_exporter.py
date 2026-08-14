@@ -91,6 +91,30 @@ AU.L2-3.3.7 (time synchronization):
   - New finding type "Time Synchronization" (from the on-prem policy
     collector's new w32tm check) gets real, specific guidance instead of
     the generic policy-type fallback.
+
+Control-mapping redesign (naming which CMMC practice each artifact
+satisfies, plus previously missing evidence sections):
+  - New module control_mapping.py is now the single source of truth
+    connecting evidence to CMMC practices; this file never hardcodes a
+    practice ID or statement inline.
+  - A "Practices Evidenced in This Assessment" domain-navigation section
+    (_build_domain_coverage_html) groups practices by domain (AC, AU, CM,
+    IA, SC, SI) with jump-links to the actual section containing each
+    piece of evidence. Only domains with real evidence present appear.
+  - Each existing section got an id anchor and, where relevant, a
+    "Satisfies: <practice badges>" line (_satisfies_badge_html), shown only
+    for evidence actually present in this specific report.
+  - Two entirely new sections that were being collected but never
+    displayed: a consolidated Installed Software Inventory
+    (deduplicated across all endpoints, showing which hosts have each
+    package) and a Security Events section (summary by level/source, all
+    Critical/Error events up to a cap, plus a disclosed sample of
+    Information-level events) — both were real, silent gaps before this.
+  - Fixed a real, pre-existing HTML bug found while working in this area:
+    the Findings section's <div> only closed inside the
+    `if artifacts.policies:` block, so a tenant with zero policies would
+    leave every subsequent section invalidly nested inside Findings.
+    Findings now always closes its own div unconditionally.
 """
 
 import logging
@@ -99,6 +123,7 @@ from typing import Any, Dict, List, Optional
 
 from .base import ExporterBase
 from ..utils.compliance import ComplianceScorer
+from .. import control_mapping as cm
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +225,16 @@ class MSPReportExporter(ExporterBase):
                     Not assessed: {missing_labels}.
                 </div>"""
 
+        # Which evidence keys (from control_mapping.EVIDENCE_MAP) actually
+        # have real data in THIS report — drives both the domain coverage
+        # nav below and the per-section "Satisfies:" badges further down.
+        # Adding a new evidence type later means adding its detection here
+        # and one EvidenceMapping entry in control_mapping.py — nothing else
+        # in this method needs to change for it to show up correctly.
+        ad_users_for_evidence = self._ad_users(artifacts)
+        present_evidence = self._present_evidence_keys(artifacts, onprem_eps, cloud_eps, ad_users_for_evidence)
+        domain_coverage_html = self._build_domain_coverage_html(present_evidence)
+
         html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -245,6 +280,17 @@ class MSPReportExporter(ExporterBase):
         .summary-table td {{ padding: 8px; }}
         .summary-table td:first-child {{ font-weight: bold; width: 30%; }}
         .na {{ color: #999; font-style: italic; }}
+        .control-badges {{ margin: 6px 0 12px 0; font-size: 0.85em; }}
+        .badge {{ display: inline-block; padding: 2px 8px; border-radius: 10px;
+                 margin-right: 6px; margin-bottom: 4px; font-weight: bold; }}
+        .badge.direct {{ background: #e3f2fd; color: #1565c0; border: 1px solid #90caf9; }}
+        .badge.supporting {{ background: #fff3e0; color: #e65100; border: 1px solid #ffcc80; }}
+        .confidence-key {{ font-size: 0.85em; color: #666; margin: 10px 0; }}
+        .domain-nav {{ background: #f5f5f5; padding: 15px 20px; border-radius: 6px; margin: 15px 0; }}
+        .domain-nav h3 {{ margin-bottom: 8px; color: #667eea; }}
+        .domain-nav ul {{ margin: 0 0 12px 20px; }}
+        .domain-nav a {{ color: #2196F3; text-decoration: none; }}
+        .domain-nav a:hover {{ text-decoration: underline; }}
     </style>
 </head>
 <body>
@@ -275,7 +321,7 @@ class MSPReportExporter(ExporterBase):
                 </div>
             </div>{coverage_banner_html}
         </div>
-
+{domain_coverage_html}
         <div class="section">
             <h2>Infrastructure Overview</h2>
             <table>
@@ -291,8 +337,9 @@ class MSPReportExporter(ExporterBase):
 """
 
         if onprem_eps:
-            html += """        <div class="section">
+            html += f"""        <div class="section" id="sec-onprem-endpoints">
             <h2>On-Prem Endpoint Status</h2>
+            {self._satisfies_badge_html(['firewall_status', 'antivirus_status', 'patch_level'], present_evidence)}
             <table>
                 <tr>
                     <th>Hostname</th><th>IP Address</th><th>OS Version</th>
@@ -331,7 +378,7 @@ class MSPReportExporter(ExporterBase):
             html += "            </table>\n        </div>\n"
 
         if cloud_eps:
-            html += """        <div class="section">
+            html += f"""        <div class="section" id="sec-cloud-devices">
             <h2>Cloud-Managed Devices (Intune)</h2>
             <table>
                 <tr>
@@ -358,8 +405,9 @@ class MSPReportExporter(ExporterBase):
 
         ad_users = self._ad_users(artifacts)
         if ad_users:
-            html += """        <div class="section">
+            html += f"""        <div class="section" id="sec-ad-users">
             <h2>Active Directory / Identity Objects — Users</h2>
+            {self._satisfies_badge_html(['mfa_registration', 'account_identification', 'privileged_role_tracking'], present_evidence)}
             <table>
                 <tr>
                     <th>Name</th><th>Source</th><th>Status</th><th>Guest</th>
@@ -426,8 +474,9 @@ class MSPReportExporter(ExporterBase):
 
         ad_groups = self._ad_groups(artifacts)
         if ad_groups:
-            html += """        <div class="section">
+            html += f"""        <div class="section" id="sec-ad-groups">
             <h2>Active Directory / Identity Objects — Groups</h2>
+            {self._satisfies_badge_html(['guest_group_membership'], present_evidence)}
             <table>
                 <tr><th>Name</th><th>Source</th><th>Description</th><th>Detail</th></tr>
 """
@@ -467,12 +516,12 @@ class MSPReportExporter(ExporterBase):
                 f"            <div class=\"recommendation\">"
                 f"<strong>Recommendation:</strong> {finding['recommendation']}</div>\n"
             )
+        html += "        </div>\n"
 
         if artifacts.policies:
-            html += """        </div>
-
-        <div class="section">
+            html += f"""        <div class="section" id="sec-policy-compliance">
             <h2>Policy Compliance</h2>
+            {self._satisfies_badge_html(['config_enforcement', 'time_sync'], present_evidence)}
             <table>
                 <tr><th>Policy</th><th>Type</th><th>Status</th><th>Current Value</th></tr>
 """
@@ -489,7 +538,10 @@ class MSPReportExporter(ExporterBase):
                     f"<td><span style=\"color:{status_color}\">{policy.status}</span></td>"
                     f"<td>{policy.value or 'N/A'}</td></tr>\n"
                 )
-            html += "            </table>\n"
+            html += "            </table>\n        </div>\n"
+
+        html += self._generate_software_inventory_html(artifacts, present_evidence)
+        html += self._generate_security_events_html(artifacts, present_evidence)
 
         scope_items = []
         if onprem_eps:
@@ -539,6 +591,306 @@ class MSPReportExporter(ExporterBase):
     </div>
 </body>
 </html>"""
+        return html
+
+    # Maps each evidence_key to the anchor id of the actual report section
+    # that displays it — kept here, not in control_mapping.py, since this is
+    # about THIS report's layout, not CMMC semantics. Update this whenever a
+    # new section is added or an evidence type moves to a different one.
+    _EVIDENCE_SECTION_ANCHORS: Dict[str, str] = {
+        'firewall_status': 'sec-onprem-endpoints',
+        'antivirus_status': 'sec-onprem-endpoints',
+        'patch_level': 'sec-onprem-endpoints',
+        'installed_software': 'sec-software-inventory',
+        'config_enforcement': 'sec-policy-compliance',
+        'time_sync': 'sec-policy-compliance',
+        'audit_log_collection': 'sec-security-events',
+        'audit_user_traceability': 'sec-security-events',
+        'mfa_registration': 'sec-ad-users',
+        'account_identification': 'sec-ad-users',
+        'privileged_role_tracking': 'sec-ad-users',
+        'guest_group_membership': 'sec-ad-groups',
+    }
+
+    def _present_evidence_keys(self, artifacts: Any, onprem_eps: List, cloud_eps: List, ad_users: List) -> List[str]:
+        """Determine which control_mapping.EVIDENCE_MAP keys have real data
+        in THIS specific report — not which evidence types the tool
+        theoretically supports, but which ones actually fired this run. A
+        cloud-only tenant shouldn't claim firewall-status evidence just
+        because the on-prem collector exists in the codebase somewhere.
+
+        To add a new evidence type later: add its detection line here, and
+        one EvidenceMapping entry in control_mapping.py. Nothing else needs
+        to change for it to appear in the domain coverage nav and section
+        badges.
+        """
+        present = []
+
+        if any(getattr(u, 'attributes', {}).get('isMfaRegistered') is not None for u in ad_users):
+            present.append('mfa_registration')
+        elif any(p.policy_type == 'Conditional Access' for p in artifacts.policies):
+            present.append('mfa_registration')
+
+        if any(p.policy_type == 'Time Synchronization' for p in artifacts.policies):
+            present.append('time_sync')
+
+        if any(self._software_list(ep) for ep in artifacts.endpoints):
+            present.append('installed_software')
+
+        if any(p.policy_type in ('UAC (Local Policy)', 'Local Security Policy', 'Intune Configuration Profile')
+               for p in artifacts.policies):
+            present.append('config_enforcement')
+
+        if artifacts.security_events:
+            present.append('audit_log_collection')
+
+        if any(e.user for e in artifacts.security_events):
+            present.append('audit_user_traceability')
+
+        if any(ep.antivirus_status is not None for ep in onprem_eps):
+            present.append('antivirus_status')
+
+        if any(ep.installed_updates for ep in onprem_eps):
+            present.append('patch_level')
+
+        if ad_users:
+            present.append('account_identification')
+
+        if onprem_eps:
+            present.append('firewall_status')
+
+        if any(getattr(u, 'attributes', {}).get('isPrivileged') is not None for u in ad_users):
+            present.append('privileged_role_tracking')
+
+        if any(getattr(u, 'attributes', {}).get('isGuest') is not None for u in ad_users):
+            present.append('guest_group_membership')
+
+        return present
+
+    def _build_domain_coverage_html(self, present_evidence_keys: List[str]) -> str:
+        """Render the domain-family navigation section — the "sheets" view.
+        Only domains with at least one practice actually evidenced in this
+        report appear; a domain this toolkit collects nothing for (e.g. MP,
+        PE, PS) is correctly absent rather than shown empty or padded out.
+
+        Each evidence line links to the actual section that displays it
+        (via _EVIDENCE_SECTION_ANCHORS), not a generic per-domain anchor —
+        several existing sections span more than one domain's worth of
+        evidence at once (the endpoint table alone covers SC, SI, and CM),
+        so a single "domain anchor" wouldn't correctly point anywhere.
+        """
+        coverage = cm.domain_coverage(present_evidence_keys)
+        if not coverage:
+            return ""
+
+        # Reverse-lookup: for a given practice+evidence label, find which
+        # evidence_key produced it, so we can look up its section anchor.
+        label_to_key = {ev.label: ev.evidence_key for ev in cm.EVIDENCE_MAP}
+
+        sections = []
+        for domain, entries in coverage.items():
+            items = []
+            for entry in entries:
+                practice = entry["practice"]
+                has_supporting = any(conf == cm.Confidence.SUPPORTING for _, conf in entry["evidence"])
+                badge_class = "supporting" if has_supporting else "direct"
+                evidence_links = []
+                for label, _ in entry["evidence"]:
+                    key = label_to_key.get(label)
+                    anchor = self._EVIDENCE_SECTION_ANCHORS.get(key, "")
+                    if anchor:
+                        evidence_links.append(f'<a href="#{anchor}">{label}</a>')
+                    else:
+                        evidence_links.append(label)
+                items.append(
+                    f'<li><span class="badge {badge_class}">{practice.practice_id}</span> '
+                    f'{practice.short_name} — {"; ".join(evidence_links)}</li>'
+                )
+            sections.append(
+                f'<li><strong>{domain} — {cm.DOMAIN_NAMES[domain]}</strong>'
+                f'<ul>{"".join(items)}</ul></li>'
+            )
+
+        return f"""
+        <div class="section domain-nav">
+            <h3>Practices Evidenced in This Assessment</h3>
+            <p class="confidence-key">
+                <span class="badge direct">Direct</span> = evidence maps one-to-one to the practice's
+                assessment objective &nbsp;&nbsp;
+                <span class="badge supporting">Supporting</span> = real, relevant evidence that
+                partially — not fully — satisfies the practice
+            </p>
+            <ul>
+{"".join(sections)}
+            </ul>
+        </div>"""
+
+    @staticmethod
+    def _satisfies_badge_html(evidence_keys: List[str], present_evidence_keys: List[str]) -> str:
+        """Render the "Satisfies:" badge line shown under a section heading.
+        Filters to only the keys actually present in this report, so a
+        badge never claims coverage the data doesn't back up.
+
+        A practice's badge is DIRECT if any active evidence mapped to it is
+        DIRECT, otherwise SUPPORTING — i.e. shown at the best confidence
+        level the evidence actually present in this report can support.
+        """
+        active_keys = [k for k in evidence_keys if k in present_evidence_keys]
+        if not active_keys:
+            return ""
+
+        practice_confidence: Dict[str, cm.Confidence] = {}
+        for key in active_keys:
+            ev = cm.get_evidence(key)
+            for pid in ev.practice_ids:
+                if practice_confidence.get(pid) != cm.Confidence.DIRECT:
+                    practice_confidence[pid] = ev.confidence
+
+        if not practice_confidence:
+            return ""
+        badges = "".join(
+            f'<span class="badge {conf.value}">{pid}</span>'
+            for pid, conf in sorted(practice_confidence.items())
+        )
+        return f'<div class="control-badges">Satisfies: {badges}</div>'
+
+    def _generate_software_inventory_html(self, artifacts: Any, present_evidence: List[str]) -> str:
+        """A single consolidated software inventory across every endpoint —
+        on-prem and cloud alike — as its own dedicated section/page, in
+        addition to the per-device expandable lists already shown in the
+        endpoint tables. Not strictly required by CM.L2-3.4.1's assessment
+        objectives (those just require the inventory to exist and be
+        maintained, which the per-device view already satisfies), but a
+        single consolidated view is a more useful document to actually hand
+        an assessor than hunting through per-device <details> elements.
+
+        Deduplicated by (name, version, publisher) — genuinely different
+        versions of the same package across hosts are shown as separate
+        rows on purpose, since that IS meaningfully different information,
+        not noise to collapse away.
+        """
+        if 'installed_software' not in present_evidence:
+            return ""
+
+        grouped: Dict[tuple, List[str]] = {}
+        for ep in artifacts.endpoints:
+            for s in self._software_list(ep):
+                key = (s.get('name', 'Unknown'), s.get('version') or '', s.get('publisher') or '')
+                grouped.setdefault(key, []).append(ep.hostname)
+
+        if not grouped:
+            return ""
+
+        rows = []
+        for (name, version, publisher), hosts in sorted(grouped.items(), key=lambda kv: kv[0][0].lower()):
+            unique_hosts = sorted(set(hosts))
+            rows.append(
+                f"                <tr><td>{name}</td><td>{version or '<span class=\"na\">N/A</span>'}</td>"
+                f"<td>{publisher or '<span class=\"na\">Unknown</span>'}</td>"
+                f"<td>{', '.join(unique_hosts)}</td></tr>\n"
+            )
+
+        badge = self._satisfies_badge_html(['installed_software'], present_evidence)
+        return f"""        <div class="section" id="sec-software-inventory">
+            <h2>Installed Software Inventory</h2>
+            {badge}
+            <p>{len(grouped)} unique software package(s) across {len(artifacts.endpoints)} endpoint(s).</p>
+            <table>
+                <tr><th>Name</th><th>Version</th><th>Publisher</th><th>Found On</th></tr>
+{"".join(rows)}
+            </table>
+        </div>
+"""
+
+    def _generate_security_events_html(self, artifacts: Any, present_evidence: List[str]) -> str:
+        """Security events were being collected and scored but never
+        actually shown anywhere in the report — same blind spot the AD
+        tables had before. Can't dump potentially thousands of raw events
+        into one HTML file, so this shows EVERY Critical/Error event (the
+        actual audit-relevant ones) up to a sane cap, plus a small sample of
+        Information-level events for context — with an explicit disclosure
+        of exactly how much is shown out of the real total, so this never
+        reads as a complete dump when it isn't.
+        """
+        if 'audit_log_collection' not in present_evidence:
+            return ""
+
+        events = artifacts.security_events
+        if not events:
+            return ""
+
+        MAX_SEVERE_ROWS = 200
+        SAMPLE_INFO_ROWS = 10
+
+        severe = [e for e in events if e.level in ('Critical', 'Error')]
+        informational = [e for e in events if e.level not in ('Critical', 'Error')]
+        shown_severe = severe[:MAX_SEVERE_ROWS]
+        shown_info = informational[:SAMPLE_INFO_ROWS]
+
+        by_level: Dict[str, int] = {}
+        by_source: Dict[str, int] = {}
+        for e in events:
+            by_level[e.level] = by_level.get(e.level, 0) + 1
+            by_source[e.source] = by_source.get(e.source, 0) + 1
+
+        summary_rows = "".join(
+            f"                <tr><td>{level}</td><td>{count}</td></tr>\n"
+            for level, count in sorted(by_level.items(), key=lambda kv: -kv[1])
+        )
+        source_rows = "".join(
+            f"                <tr><td>{source}</td><td>{count}</td></tr>\n"
+            for source, count in sorted(by_source.items(), key=lambda kv: -kv[1])
+        )
+
+        def event_row(e) -> str:
+            level_color = {'Critical': 'red', 'Error': 'red', 'Warning': 'orange'}.get(e.level, '#333')
+            msg = (e.message or '').replace('\r\n', ' ').replace('\n', ' ')
+            if len(msg) > 150:
+                msg = msg[:150] + "…"
+            return (
+                f"                <tr><td>{e.timestamp}</td><td>{e.source}</td>"
+                f"<td><span style=\"color:{level_color}\">{e.level}</span></td>"
+                f"<td>{e.user or '<span class=\"na\">N/A</span>'}</td><td>{msg}</td></tr>\n"
+            )
+
+        disclosure_bits = []
+        if len(severe) > MAX_SEVERE_ROWS:
+            disclosure_bits.append(f"{MAX_SEVERE_ROWS} of {len(severe)} Critical/Error events shown")
+        else:
+            disclosure_bits.append(f"all {len(severe)} Critical/Error event(s) shown")
+        disclosure_bits.append(f"{len(shown_info)} of {len(informational)} Information-level event(s) shown as a sample")
+
+        badge = self._satisfies_badge_html(['audit_log_collection', 'audit_user_traceability'], present_evidence)
+        html = f"""        <div class="section" id="sec-security-events">
+            <h2>Security Events</h2>
+            {badge}
+            <p>{len(events)} total event(s) collected. {'; '.join(disclosure_bits)}.</p>
+            <table>
+                <tr><th>Level</th><th>Count</th></tr>
+{summary_rows}
+            </table>
+            <table>
+                <tr><th>Source</th><th>Count</th></tr>
+{source_rows}
+            </table>
+"""
+        if shown_severe:
+            html += """            <h3>Critical / Error Events</h3>
+            <table>
+                <tr><th>Timestamp</th><th>Source</th><th>Level</th><th>User</th><th>Message</th></tr>
+"""
+            html += "".join(event_row(e) for e in shown_severe)
+            html += "            </table>\n"
+
+        if shown_info:
+            html += """            <h3>Sample Information-Level Events</h3>
+            <table>
+                <tr><th>Timestamp</th><th>Source</th><th>Level</th><th>User</th><th>Message</th></tr>
+"""
+            html += "".join(event_row(e) for e in shown_info)
+            html += "            </table>\n"
+
+        html += "        </div>\n"
         return html
 
     @staticmethod
