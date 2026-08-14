@@ -91,30 +91,6 @@ AU.L2-3.3.7 (time synchronization):
   - New finding type "Time Synchronization" (from the on-prem policy
     collector's new w32tm check) gets real, specific guidance instead of
     the generic policy-type fallback.
-
-Control-mapping redesign (naming which CMMC practice each artifact
-satisfies, plus previously missing evidence sections):
-  - New module control_mapping.py is now the single source of truth
-    connecting evidence to CMMC practices; this file never hardcodes a
-    practice ID or statement inline.
-  - A "Practices Evidenced in This Assessment" domain-navigation section
-    (_build_domain_coverage_html) groups practices by domain (AC, AU, CM,
-    IA, SC, SI) with jump-links to the actual section containing each
-    piece of evidence. Only domains with real evidence present appear.
-  - Each existing section got an id anchor and, where relevant, a
-    "Satisfies: <practice badges>" line (_satisfies_badge_html), shown only
-    for evidence actually present in this specific report.
-  - Two entirely new sections that were being collected but never
-    displayed: a consolidated Installed Software Inventory
-    (deduplicated across all endpoints, showing which hosts have each
-    package) and a Security Events section (summary by level/source, all
-    Critical/Error events up to a cap, plus a disclosed sample of
-    Information-level events) — both were real, silent gaps before this.
-  - Fixed a real, pre-existing HTML bug found while working in this area:
-    the Findings section's <div> only closed inside the
-    `if artifacts.policies:` block, so a tenant with zero policies would
-    leave every subsequent section invalidly nested inside Findings.
-    Findings now always closes its own div unconditionally.
 """
 
 import logging
@@ -218,7 +194,7 @@ class MSPReportExporter(ExporterBase):
         if coverage['assessed_weight_pct'] < 100:
             missing_labels = ', '.join(d.replace('_', ' ') for d in coverage['missing_dimensions'])
             coverage_banner_html = f"""
-                <div class="recommendation" style="border-left-color:#f44336;background:#ffebee;margin-top:15px;">
+                <div class="alert-critical">
                     <strong>Coverage incomplete:</strong> this score is based on
                     {coverage['assessed_count']} of {coverage['total_count']} scoring categories
                     ({coverage['assessed_weight_pct']}% of total scoring weight).
@@ -241,56 +217,73 @@ class MSPReportExporter(ExporterBase):
     <meta charset="UTF-8">
     <title>CMMC Compliance Assessment Report</title>
     <style>
-        * {{ margin: 0; padding: 0; }}
-        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                line-height: 1.6; color: #333; }}
-        .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                   color: white; padding: 40px; text-align: center; }}
-        .header h1 {{ font-size: 2.5em; margin-bottom: 10px; }}
-        .header .subtitle {{ font-size: 1.2em; opacity: 0.9; }}
-        .content {{ max-width: 900px; margin: 0 auto; padding: 30px; }}
-        .section {{ margin: 30px 0; page-break-inside: avoid; }}
-        .section h2 {{ color: #667eea; border-bottom: 3px solid #667eea;
-                       padding-bottom: 10px; margin-bottom: 15px; }}
-        .score-card {{ display: flex; justify-content: space-around; margin: 20px 0; }}
-        .score {{ background: #f5f5f5; padding: 20px; border-radius: 8px; text-align: center;
-                 flex: 1; margin: 0 10px; }}
-        .score .number {{ font-size: 3em; font-weight: bold; color: #667eea; }}
-        .score .label {{ color: #666; margin-top: 5px; }}
-        .score.good {{ background: #e8f5e9; }}
-        .score.good .number {{ color: #4caf50; }}
-        .score.warning {{ background: #fff3e0; }}
-        .score.warning .number {{ color: #ff9800; }}
-        .score.critical {{ background: #ffebee; }}
-        .score.critical .number {{ color: #f44336; }}
-        .finding {{ margin: 15px 0; padding: 15px; border-left: 4px solid #ff9800;
-                   background: #fff9c4; border-radius: 4px; }}
-        .finding.critical {{ border-left-color: #f44336; background: #ffebee; }}
-        .finding.resolved {{ border-left-color: #4caf50; background: #e8f5e9; }}
-        .finding h4 {{ margin-bottom: 5px; }}
-        .finding p {{ font-size: 0.95em; line-height: 1.5; }}
-        table {{ width: 100%; border-collapse: collapse; margin: 15px 0; }}
-        th {{ background-color: #f5f5f5; padding: 12px; text-align: left;
-              border-bottom: 2px solid #ddd; }}
-        td {{ padding: 10px; border-bottom: 1px solid #eee; }}
-        .recommendation {{ background: #e3f2fd; padding: 15px;
-                          border-left: 4px solid #2196F3; margin: 10px 0; }}
-        .footer {{ background: #f5f5f5; padding: 20px; text-align: center;
-                  margin-top: 40px; border-top: 1px solid #ddd; color: #999; }}
-        .summary-table td {{ padding: 8px; }}
-        .summary-table td:first-child {{ font-weight: bold; width: 30%; }}
-        .na {{ color: #999; font-style: italic; }}
-        .control-badges {{ margin: 6px 0 12px 0; font-size: 0.85em; }}
-        .badge {{ display: inline-block; padding: 2px 8px; border-radius: 10px;
-                 margin-right: 6px; margin-bottom: 4px; font-weight: bold; }}
-        .badge.direct {{ background: #e3f2fd; color: #1565c0; border: 1px solid #90caf9; }}
-        .badge.supporting {{ background: #fff3e0; color: #e65100; border: 1px solid #ffcc80; }}
-        .confidence-key {{ font-size: 0.85em; color: #666; margin: 10px 0; }}
-        .domain-nav {{ background: #f5f5f5; padding: 15px 20px; border-radius: 6px; margin: 15px 0; }}
-        .domain-nav h3 {{ margin-bottom: 8px; color: #667eea; }}
-        .domain-nav ul {{ margin: 0 0 12px 20px; }}
-        .domain-nav a {{ color: #2196F3; text-decoration: none; }}
-        .domain-nav a:hover {{ text-decoration: underline; }}
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: Calibri, 'Segoe UI', Arial, sans-serif;
+                line-height: 1.6; color: #1f2937; background: #ffffff; }}
+        .header {{ background: #1e293b; color: #f1f5f9; padding: 36px 40px;
+                   border-bottom: 4px solid #0f172a; }}
+        .header h1 {{ font-family: Georgia, 'Times New Roman', serif;
+                      font-size: 2em; font-weight: normal; letter-spacing: 0.3px; }}
+        .header .subtitle {{ font-size: 1em; color: #94a3b8; margin-top: 6px;
+                             text-transform: uppercase; letter-spacing: 1.5px; }}
+        .content {{ max-width: 920px; margin: 0 auto; padding: 40px 30px; }}
+        .section {{ margin: 34px 0; page-break-inside: avoid; }}
+        .section h2 {{ font-family: Georgia, 'Times New Roman', serif; font-weight: normal;
+                       font-size: 1.3em; color: #1e293b; border-bottom: 1px solid #cbd5e1;
+                       padding-bottom: 8px; margin-bottom: 14px; letter-spacing: 0.2px; }}
+        .domain-nav h3 {{ font-family: Georgia, 'Times New Roman', serif; font-weight: normal;
+                          font-size: 1.15em; color: #1e293b; margin-bottom: 10px; }}
+        .score-card {{ display: flex; margin: 16px 0; }}
+        .score {{ background: #f8fafc; border: 1px solid #e2e8f0; padding: 24px;
+                 text-align: center; flex: 1; }}
+        .score .number {{ font-size: 2.6em; font-weight: 600; color: #1e293b; }}
+        .score .label {{ color: #64748b; margin-top: 6px; font-size: 0.9em;
+                        text-transform: uppercase; letter-spacing: 0.8px; }}
+        .score.good {{ border-left: 4px solid #2f7d4f; }}
+        .score.good .number {{ color: #2f7d4f; }}
+        .score.warning {{ border-left: 4px solid #b7791f; }}
+        .score.warning .number {{ color: #b7791f; }}
+        .score.critical {{ border-left: 4px solid #b3261e; }}
+        .score.critical .number {{ color: #b3261e; }}
+        .finding {{ margin: 12px 0; padding: 14px 16px; border-left: 3px solid #b7791f;
+                   background: #fafaf9; }}
+        .finding.critical {{ border-left-color: #b3261e; background: #fdf7f6; }}
+        .finding.resolved {{ border-left-color: #2f7d4f; background: #f6faf7; }}
+        .finding h4 {{ margin-bottom: 4px; font-size: 1em; color: #1e293b; }}
+        .finding p {{ font-size: 0.92em; line-height: 1.5; color: #334155; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 0.92em; }}
+        th {{ background: #f1f5f9; color: #334155; padding: 10px 12px; text-align: left;
+              border-bottom: 2px solid #cbd5e1; font-weight: 600; font-size: 0.85em;
+              text-transform: uppercase; letter-spacing: 0.4px; }}
+        td {{ padding: 9px 12px; border-bottom: 1px solid #e2e8f0; }}
+        tr:nth-child(even) td {{ background: #fafbfc; }}
+        .recommendation {{ background: #f8fafc; padding: 12px 16px;
+                          border-left: 3px solid #3b5b7a; margin: 8px 0 20px 0; font-size: 0.92em; }}
+        .alert-critical {{ border-left: 3px solid #b3261e; background: #fdf7f6;
+                           padding: 12px 16px; margin-top: 14px; font-size: 0.92em; }}
+        .footer {{ background: #f8fafc; padding: 20px; text-align: center;
+                  margin-top: 40px; border-top: 1px solid #e2e8f0; color: #64748b; font-size: 0.88em; }}
+        .summary-table td {{ padding: 7px 10px; }}
+        .summary-table td:first-child {{ font-weight: 600; width: 32%; color: #475569; }}
+        .na {{ color: #94a3b8; font-style: italic; }}
+        .status-good {{ color: #2f7d4f; font-weight: 600; }}
+        .status-bad {{ color: #b3261e; font-weight: 600; }}
+        .status-warn {{ color: #b7791f; font-weight: 600; }}
+        .status-neutral {{ color: #94a3b8; }}
+        .control-badges {{ margin: 4px 0 14px 0; font-size: 0.82em; }}
+        .badge {{ display: inline-block; padding: 1px 8px; border-radius: 3px;
+                 margin-right: 6px; margin-bottom: 4px; font-weight: 600; font-size: 0.95em;
+                 border: 1px solid; }}
+        .badge.direct {{ background: #f0f4f8; color: #2c4a6b; border-color: #c3d4e3; }}
+        .badge.supporting {{ background: #faf6ef; color: #8a5a1f; border-color: #e5d2b0; }}
+        .confidence-key {{ font-size: 0.85em; color: #64748b; margin: 8px 0 14px 0; }}
+        .domain-nav {{ background: #f8fafc; border: 1px solid #e2e8f0; padding: 18px 22px;
+                       margin: 18px 0; }}
+        .domain-nav ul {{ margin: 0 0 10px 20px; }}
+        .domain-nav li {{ margin-bottom: 4px; }}
+        .domain-nav a {{ color: #2c4a6b; text-decoration: none; border-bottom: 1px dotted #2c4a6b; }}
+        .domain-nav a:hover {{ border-bottom-style: solid; }}
+        details summary {{ cursor: pointer; color: #2c4a6b; font-size: 0.92em; }}
     </style>
 </head>
 <body>
@@ -348,8 +341,8 @@ class MSPReportExporter(ExporterBase):
                 </tr>
 """
             for ep in onprem_eps:
-                fw_color = 'green' if ep.firewall_status == 'Enabled' else ('orange' if ep.firewall_status == 'Partial' else 'red')
-                av_color = 'green' if ep.antivirus_status == 'Active' else 'red'
+                fw_color = 'status-good' if ep.firewall_status == 'Enabled' else ('status-warn' if ep.firewall_status == 'Partial' else 'status-bad')
+                av_color = 'status-good' if ep.antivirus_status == 'Active' else 'status-bad'
                 disabled_profiles = self._disabled_firewall_profiles(ep)
                 fw_note = f" ({', '.join(disabled_profiles)} disabled)" if disabled_profiles else ""
                 # A device merged from both planes (matched by hostname — see
@@ -360,17 +353,17 @@ class MSPReportExporter(ExporterBase):
                 if intune:
                     compliant = intune.get('is_compliant')
                     enc = intune.get('is_encrypted')
-                    cm_color = 'green' if compliant else 'red'
+                    cm_color = 'status-good' if compliant else 'status-bad'
                     enc_note = 'encrypted' if enc else ('not encrypted' if enc is False else 'encryption unknown')
-                    cloud_cell = (f"<span style=\"color:{cm_color}\">"
+                    cloud_cell = (f"<span class=\"{cm_color}\">"
                                   f"{intune.get('compliance_state', 'Unknown')} ({enc_note})</span>")
                 else:
                     cloud_cell = '<span class="na">No</span>'
                 html += (
                     f"                <tr><td>{ep.hostname}</td><td>{ep.ip_address}</td>"
                     f"<td>{ep.os_version}</td>"
-                    f"<td><span style=\"color:{fw_color}\">{ep.firewall_status or 'Unknown'}{fw_note}</span></td>"
-                    f"<td><span style=\"color:{av_color}\">{ep.antivirus_status or 'Unknown'}</span></td>"
+                    f"<td><span class=\"{fw_color}\">{ep.firewall_status or 'Unknown'}{fw_note}</span></td>"
+                    f"<td><span class=\"{av_color}\">{ep.antivirus_status or 'Unknown'}</span></td>"
                     f"<td>{cloud_cell}</td>"
                     f"<td>{self._software_cell(ep)}</td>"
                     f"</tr>\n"
@@ -390,13 +383,13 @@ class MSPReportExporter(ExporterBase):
             for ep in cloud_eps:
                 meta = ep.metadata or {}
                 compliant = meta.get('is_compliant')
-                comp_color = 'green' if compliant else 'red'
+                comp_color = 'status-good' if compliant else 'status-bad'
                 enc = meta.get('is_encrypted')
-                enc_color = 'green' if enc else 'orange'
+                enc_color = 'status-good' if enc else 'status-warn'
                 html += (
                     f"                <tr><td>{ep.hostname}</td><td>{ep.os_version}</td>"
-                    f"<td><span style=\"color:{comp_color}\">{meta.get('compliance_state', 'Unknown')}</span></td>"
-                    f"<td><span style=\"color:{enc_color}\">{enc}</span></td>"
+                    f"<td><span class=\"{comp_color}\">{meta.get('compliance_state', 'Unknown')}</span></td>"
+                    f"<td><span class=\"{enc_color}\">{enc}</span></td>"
                     f"<td>{meta.get('management_state', 'Unknown')}</td>"
                     f"<td>{meta.get('owner_upn', 'Unknown')}</td>"
                     f"<td>{self._software_cell(ep)}</td></tr>\n"
@@ -425,14 +418,14 @@ class MSPReportExporter(ExporterBase):
                 else:
                     disabled = attrs.get('disabled')
                     enabled = (not disabled) if disabled is not None else None
-                status_color = 'green' if enabled else ('red' if enabled is False else '#999')
+                status_color = 'status-good' if enabled else ('status-bad' if enabled is False else 'status-neutral')
                 status_label = 'Enabled' if enabled else ('Disabled' if enabled is False else 'Unknown')
 
                 is_guest = attrs.get('isGuest')
                 guest_cell = ('Yes' if is_guest else 'No') if is_guest is not None else '<span class="na">N/A</span>'
 
                 stale = attrs.get('isStale')
-                stale_color = 'red' if stale else ('green' if stale is False else '#999')
+                stale_color = 'status-bad' if stale else ('status-good' if stale is False else 'status-neutral')
                 stale_label = 'Yes' if stale else ('No' if stale is False else 'Unknown')
 
                 # Privileged: True/False is a real answer either plane produced;
@@ -441,12 +434,12 @@ class MSPReportExporter(ExporterBase):
                 privileged = attrs.get('isPrivileged')
                 roles = attrs.get('privilegedRoles') or []
                 if privileged is True:
-                    priv_color = 'red'
+                    priv_color = 'status-bad'
                     priv_label = 'YES' + (f" ({', '.join(roles)})" if roles else " (privileged AD group)")
                 elif privileged is False:
-                    priv_color, priv_label = 'green', 'No'
+                    priv_color, priv_label = 'status-good', 'No'
                 else:
-                    priv_color, priv_label = '#999', 'Unknown'
+                    priv_color, priv_label = 'status-neutral', 'Unknown'
 
                 # MFA is a cloud-only concept today — on-prem AD has no MFA
                 # signal, so it's N/A, not a false "No".
@@ -456,18 +449,18 @@ class MSPReportExporter(ExporterBase):
                     mfa_cell = '<span class="na">N/A (on-prem)</span>'
                 elif mfa is True:
                     method_note = f" ({', '.join(methods)})" if methods else ""
-                    mfa_cell = f'<span style="color:green">Yes{method_note}</span>'
+                    mfa_cell = f'<span class="status-good">Yes{method_note}</span>'
                 elif mfa is False:
-                    mfa_cell = '<span style="color:red">No</span>'
+                    mfa_cell = '<span class="status-bad">No</span>'
                 else:
-                    mfa_cell = '<span style="color:#999">Unknown</span>'
+                    mfa_cell = '<span class="status-neutral">Unknown</span>'
 
                 html += (
                     f"                <tr><td>{name}</td><td>{'Entra ID' if is_cloud else 'On-Prem AD'}</td>"
-                    f"<td><span style=\"color:{status_color}\">{status_label}</span></td>"
+                    f"<td><span class=\"{status_color}\">{status_label}</span></td>"
                     f"<td>{guest_cell}</td>"
-                    f"<td><span style=\"color:{stale_color}\">{stale_label}</span></td>"
-                    f"<td><span style=\"color:{priv_color}\">{priv_label}</span></td>"
+                    f"<td><span class=\"{stale_color}\">{stale_label}</span></td>"
+                    f"<td><span class=\"{priv_color}\">{priv_label}</span></td>"
                     f"<td>{mfa_cell}</td></tr>\n"
                 )
             html += "            </table>\n        </div>\n"
@@ -528,14 +521,14 @@ class MSPReportExporter(ExporterBase):
             for policy in artifacts.policies:
                 passes = ComplianceScorer._policy_passes(policy)
                 if passes is True:
-                    status_color = 'green'
+                    status_color = 'status-good'
                 elif passes is False:
-                    status_color = 'red'
+                    status_color = 'status-bad'
                 else:
-                    status_color = '#999'  # informational / no specific rule — not a warning
+                    status_color = 'status-neutral'  # informational / no specific rule — not a warning
                 html += (
                     f"                <tr><td>{policy.policy_name}</td><td>{policy.policy_type}</td>"
-                    f"<td><span style=\"color:{status_color}\">{policy.status}</span></td>"
+                    f"<td><span class=\"{status_color}\">{policy.status}</span></td>"
                     f"<td>{policy.value or 'N/A'}</td></tr>\n"
                 )
             html += "            </table>\n        </div>\n"
@@ -843,13 +836,13 @@ class MSPReportExporter(ExporterBase):
         )
 
         def event_row(e) -> str:
-            level_color = {'Critical': 'red', 'Error': 'red', 'Warning': 'orange'}.get(e.level, '#333')
+            level_color = {'Critical': 'status-bad', 'Error': 'status-bad', 'Warning': 'status-warn'}.get(e.level, 'status-neutral')
             msg = (e.message or '').replace('\r\n', ' ').replace('\n', ' ')
             if len(msg) > 150:
                 msg = msg[:150] + "…"
             return (
                 f"                <tr><td>{e.timestamp}</td><td>{e.source}</td>"
-                f"<td><span style=\"color:{level_color}\">{e.level}</span></td>"
+                f"<td><span class=\"{level_color}\">{e.level}</span></td>"
                 f"<td>{e.user or '<span class=\"na\">N/A</span>'}</td><td>{msg}</td></tr>\n"
             )
 
