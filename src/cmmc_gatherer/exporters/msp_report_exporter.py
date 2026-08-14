@@ -320,6 +320,20 @@ class MSPReportExporter(ExporterBase):
         domain_coverage_html = self._build_domain_coverage_html(present_evidence)
         scoring_breakdown_html = self._build_scoring_breakdown_html(artifacts)
 
+        # Purely data-derived — no TenantProfile reaches this exporter, so
+        # this reflects what was actually collected, not what was
+        # configured. The two can differ (e.g. a hybrid-configured tenant
+        # where the on-prem plane happened to fail this run) — showing the
+        # real collected shape is more honest than echoing the config.
+        if onprem_eps and cloud_eps:
+            collection_mode_label = "Hybrid (On-Prem + Cloud)"
+        elif onprem_eps:
+            collection_mode_label = "On-Prem Only"
+        elif cloud_eps:
+            collection_mode_label = "Cloud Only"
+        else:
+            collection_mode_label = "No Endpoint Data Collected"
+
         html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -340,6 +354,7 @@ class MSPReportExporter(ExporterBase):
                 <tr><td>Customer:</td><td>{customer_name}</td></tr>
                 <tr><td>Assessment ID:</td><td>{assessment_id}</td></tr>
                 <tr><td>Assessment Date:</td><td>{datetime.now().strftime("%Y-%m-%d")}</td></tr>
+                <tr><td>Collection Mode:</td><td>{collection_mode_label}</td></tr>
                 <tr><td>Overall Compliance Score:</td><td>{compliance_score}%</td></tr>
                 <tr><td>Scoring Coverage:</td><td>{coverage['assessed_count']} of {coverage['total_count']} categories
                     ({coverage['assessed_weight_pct']}% of scoring weight)</td></tr>

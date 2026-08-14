@@ -88,3 +88,54 @@ class TenantProfile:
 
     def runs_onprem(self) -> bool:
         return Plane.ONPREM in self.planes
+
+    def deployment_mode(self) -> str:
+        """Human-readable label for which plane(s) this tenant runs.
+
+        The `planes` list is the single, simple point of control for
+        distinguishing a hybrid client from an on-prem-only or cloud-only
+        one — this just gives that a clear label for logging and reporting,
+        instead of every caller re-deriving it from runs_onprem()/runs_cloud()
+        by hand. Set `planes` once per client in tenants.yaml; everything
+        else (which collectors run, device merging, this label) follows
+        from that one field automatically.
+        """
+        onprem, cloud = self.runs_onprem(), self.runs_cloud()
+        if onprem and cloud:
+            return "hybrid"
+        if onprem:
+            return "onprem"
+        if cloud:
+            return "cloud"
+        return "none"  # misconfigured — empty planes list, caught by validate()
+
+    def validate(self) -> None:
+        """Fail fast with a specific, actionable error if this profile is
+        missing required fields for the plane(s) it claims to run — rather
+        than silently producing empty or broken collection results deep
+        inside a collector, which is a much harder failure to diagnose.
+
+        Called both by the YAML config loader (tenant_config_loader.py) and
+        by the orchestrator itself, so a profile built directly in Python
+        (e.g. a hand-edited pilot_test.py) gets the same safety net as one
+        loaded from tenants.yaml — there's only one place this check lives.
+
+        Only the cloud plane's fields are hard-required here. On-prem's
+        domain_config is intentionally NOT required: ActiveDirectoryCollector
+        already has a legitimate, working demo-mode fallback when
+        domain_config is absent (confirmed against real pilot runs all
+        session) — that's a real, supported configuration, not a
+        misconfiguration to reject.
+        """
+        if not self.runs_onprem() and not self.runs_cloud():
+            raise ValueError(
+                f"Tenant '{self.tenant_key}': planes list is empty — must include "
+                f"at least one of {[p.value for p in Plane]}."
+            )
+        if self.runs_cloud():
+            missing = [f for f in ("tenant_id", "client_id", "secret_ref") if not getattr(self, f)]
+            if missing:
+                raise ValueError(
+                    f"Tenant '{self.tenant_key}' has Plane.CLOUD in its planes list but is "
+                    f"missing required field(s): {', '.join(missing)}."
+                )

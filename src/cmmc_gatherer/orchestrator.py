@@ -74,6 +74,8 @@ class TenantOrchestrator:
 
     def run_one(self, profile: TenantProfile) -> TenantRunResult:
         """Run whichever plane(s) this tenant is configured for."""
+        profile.validate()  # fail fast with a specific error, not a mysterious empty result
+        logger.info("[%s] deployment mode: %s", profile.tenant_key, profile.deployment_mode())
         errors: List[str] = []
         onprem_endpoints, cloud_endpoints = [], []
         ad_objects, events, policies = [], [], []

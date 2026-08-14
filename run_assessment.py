@@ -114,8 +114,11 @@ def main() -> int:
     if args.list:
         print(f"{len(profiles)} tenant(s) configured in {args.config}:")
         for p in profiles:
-            planes = "+".join(pl.value for pl in p.planes)
-            print(f"  {p.tenant_key:20s} {p.display_name:30s} [{planes}]")
+            try:
+                p.validate()
+                print(f"  {p.tenant_key:20s} {p.display_name:30s} [{p.deployment_mode()}]")
+            except ValueError as e:
+                print(f"  {p.tenant_key:20s} {p.display_name:30s} [INVALID CONFIG: {e}]")
         return 0
 
     if args.tenant:
