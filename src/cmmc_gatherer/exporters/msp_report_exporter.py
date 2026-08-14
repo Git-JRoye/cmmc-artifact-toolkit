@@ -571,7 +571,7 @@ class MSPReportExporter(ExporterBase):
         if artifacts.policies:
             html += f"""        <div class="section" id="sec-policy-compliance">
             <h2>Policy Compliance</h2>
-            {self._satisfies_badge_html(['config_enforcement', 'time_sync'], present_evidence)}
+            {self._satisfies_badge_html(['config_enforcement', 'time_sync', 'password_complexity_enforcement', 'password_reuse_enforcement', 'account_lockout_enforcement'], present_evidence)}
             <table>
                 <tr><th>Policy</th><th>Type</th><th>Status</th><th>Current Value</th></tr>
 """
@@ -653,6 +653,9 @@ class MSPReportExporter(ExporterBase):
         'patch_level': 'sec-onprem-endpoints',
         'installed_software': 'sec-software-inventory',
         'config_enforcement': 'sec-policy-compliance',
+        'password_complexity_enforcement': 'sec-policy-compliance',
+        'password_reuse_enforcement': 'sec-policy-compliance',
+        'account_lockout_enforcement': 'sec-policy-compliance',
         'time_sync': 'sec-policy-compliance',
         'audit_log_collection': 'sec-security-events',
         'audit_user_traceability': 'sec-security-events',
@@ -690,6 +693,19 @@ class MSPReportExporter(ExporterBase):
         if any(p.policy_type in ('UAC (Local Policy)', 'Local Security Policy', 'Intune Configuration Profile')
                for p in artifacts.policies):
             present.append('config_enforcement')
+
+        # More specific than the generic config_enforcement bucket above —
+        # these particular settings map to their own named CMMC practices
+        # (IA.L2-3.5.7/3.5.8, AC.L2-3.1.8) rather than the generic
+        # CM.L2-3.4.2 "configuration enforcement" catch-all. A policy can
+        # legitimately support both the specific and the generic practice
+        # at once — this isn't either/or.
+        if any(p.policy_name in ('MinimumPasswordLength', 'PasswordComplexity') for p in artifacts.policies):
+            present.append('password_complexity_enforcement')
+        if any(p.policy_name == 'PasswordHistorySize' for p in artifacts.policies):
+            present.append('password_reuse_enforcement')
+        if any(p.policy_name == 'LockoutBadCount' for p in artifacts.policies):
+            present.append('account_lockout_enforcement')
 
         if artifacts.security_events:
             present.append('audit_log_collection')

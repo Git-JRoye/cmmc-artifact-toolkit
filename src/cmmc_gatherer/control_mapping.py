@@ -155,6 +155,19 @@ PRACTICES: Dict[str, Practice] = {
         "Limit system access to the types of transactions and functions that "
         "authorized users are permitted to execute.",
     ),
+    "AC.L2-3.1.8": Practice(
+        "AC.L2-3.1.8", "AC", 2, "Unsuccessful Logon Attempts",
+        "Limit unsuccessful logon attempts.",
+    ),
+    "IA.L2-3.5.7": Practice(
+        "IA.L2-3.5.7", "IA", 2, "Password Complexity",
+        "Enforce a minimum password complexity and change of characters when "
+        "new passwords are created.",
+    ),
+    "IA.L2-3.5.8": Practice(
+        "IA.L2-3.5.8", "IA", 2, "Password Reuse",
+        "Prohibit password reuse for a specified number of generations.",
+    ),
 }
 
 EVIDENCE_MAP: List[EvidenceMapping] = [
@@ -173,6 +186,18 @@ EVIDENCE_MAP: List[EvidenceMapping] = [
     EvidenceMapping(
         "config_enforcement", "UAC settings, Local Security Policy, and Intune configuration profiles",
         ["CM.L2-3.4.2"], Confidence.DIRECT,
+    ),
+    EvidenceMapping(
+        "password_complexity_enforcement", "Minimum password length / complexity policy",
+        ["IA.L2-3.5.7"], Confidence.DIRECT,
+    ),
+    EvidenceMapping(
+        "password_reuse_enforcement", "Password history (reuse prevention) policy",
+        ["IA.L2-3.5.8"], Confidence.DIRECT,
+    ),
+    EvidenceMapping(
+        "account_lockout_enforcement", "Account lockout threshold policy",
+        ["AC.L2-3.1.8"], Confidence.DIRECT,
     ),
     EvidenceMapping(
         "audit_log_collection", "Security event and audit log collection (on-prem Event Log + Entra sign-in/audit logs)",
