@@ -131,9 +131,24 @@ class GraphClient:
 
     def __init__(self, profile: TenantProfile, auth: GraphAuthProvider, api_version: str = "v1.0"):
         self.profile = profile
+        self.api_version = api_version
         self.base = f"{profile.endpoints().graph_base}/{api_version}"
         self._auth = auth
         self._token: Optional[str] = None
+
+    def with_api_version(self, api_version: str) -> "GraphClient":
+        """Return a sibling client against a different Graph API version
+        (e.g. 'beta'), reusing this client's profile and auth provider.
+
+        Some Graph resources — particularly newer or less-stable Intune
+        device-management sub-resources — exist only under /beta and return
+        a "Resource not found for the segment" error under /v1.0. Rather
+        than force every caller to build a second GraphClient by hand (or
+        reach into this class's private _auth attribute to do it), this
+        gives collectors a clean, explicit way to opt into /beta for just
+        the one call that needs it.
+        """
+        return GraphClient(self.profile, self._auth, api_version=api_version)
 
     def _headers(self) -> Dict[str, str]:
         if self._token is None:

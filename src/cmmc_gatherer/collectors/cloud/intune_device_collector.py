@@ -25,6 +25,17 @@ for a handful of devices; on a large MSP client with hundreds of enrolled
 devices, this will be slow and is a real candidate for throttling/retry
 tuning or making optional — not yet pilot-tested against a large fleet.
 
+PILOT HISTORY on detectedApps, since this endpoint has already proven
+unreliable once: a first attempt called it under /v1.0 with $select/$top
+query params and got a 400 Bad Request from every device in a real tenant.
+The real error body (captured only after adding response-text logging)
+showed "Resource not found for the segment 'detectedApps'" — not a bad
+query param at all, but the segment not existing under /v1.0. Now calling
+it under /beta instead, which is UNVERIFIED as of this writing — if that
+also fails, don't guess a third time; log the real response body and look
+it up in current Microsoft Graph documentation rather than pattern-matching
+against past Graph quirks.
+
 Graph application permission required: DeviceManagementManagedDevices.Read.All
 (admin-consented in each tenant) — this single permission covers both the
 managedDevices list and its detectedApps sub-resource; no new permission is
@@ -46,6 +57,15 @@ class IntuneDeviceCollector(CollectorBase):
 
     def __init__(self, graph: GraphClient):
         self.graph = graph
+        # PILOT FINDING #2: detectedApps under /v1.0 returned "Resource not
+        # found for the segment 'detectedApps'" against a real tenant — not
+        # a query-param problem (that was PILOT FINDING #1, now known to be
+        # a wrong guess). This is the classic signature of a resource that
+        # only exists under /beta. Trying beta here as the next hypothesis;
+        # this is still UNVERIFIED against a live tenant as of this edit.
+        # If it fails again, the error will now say so explicitly rather
+        # than silently reusing v1.0's wrong assumption a third time.
+        self._beta_graph = graph.with_api_version("beta")
 
     def collect(self) -> List[Endpoint]:
         params = {
@@ -74,19 +94,16 @@ class IntuneDeviceCollector(CollectorBase):
         data collected in _map(), matching this file's overall pattern of
         never letting one section's failure take down another.
 
-        PILOT FINDING (real, confirmed): the first version of this call used
-        $select/$top query params and got a 400 Bad Request from every
-        device in a real tenant, identically. The detectedApps navigation
-        property apparently doesn't accept the same query options the
-        top-level managedDevices collection does. Removed both params here
-        as the fix; this itself is unverified against a live tenant as of
-        this edit — if it still fails, the response body is now logged so
-        the next pilot run gives Graph's actual error text instead of a
-        bare "400 Bad Request".
+        Uses /beta, not /v1.0 — see PILOT FINDING #2 in __init__. This is a
+        hypothesis based on the real error message from a live tenant
+        ("Resource not found for the segment 'detectedApps'" under v1.0),
+        not a confirmed-working fix. If this also fails, the response body
+        is logged so the next pilot run gives Graph's actual error text
+        instead of another guess.
         """
         apps: List[Dict[str, Any]] = []
         try:
-            for app in self.graph.get_all(
+            for app in self._beta_graph.get_all(
                 f"deviceManagement/managedDevices/{device_id}/detectedApps"
             ):
                 apps.append({
