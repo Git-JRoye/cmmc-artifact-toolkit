@@ -3,10 +3,12 @@
     Collects Windows endpoint security posture for the CMMC gatherer.
 .DESCRIPTION
     Emits a single JSON object to stdout describing OS, patch level, Defender
-    status, firewall state, and registered security products. Every section is
-    wrapped in try/catch so one failure never aborts the whole collection — the
-    corresponding field is left null and an entry is added to "collection_errors".
-    Run locally, or remotely via Invoke-Command (see the Python collector).
+    status, firewall state, registered security products, and installed
+    software (CM.L2-3.4.1 system-inventory evidence). Every section is
+    wrapped in try/catch so one failure never aborts the whole collection —
+    the corresponding field is left null and an entry is added to
+    "collection_errors". Run locally, or remotely via Invoke-Command (see the
+    Python collector).
 .NOTES
     Requires PowerShell 5.1+ and (for full data) an elevated session.
     root/SecurityCenter2 exists on client SKUs only, not Windows Server.
@@ -70,6 +72,31 @@ if ($null -eq $secProducts) {
     $secProducts = if ($defender -and $defender.AntivirusEnabled) { @('Windows Defender') } else { @() }
 }
 
+# --- Installed software inventory (CM.L2-3.4.1: system inventory must
+# include software, not just hardware/OS) ---
+# Reads the standard Windows uninstall registry hives -- the same source
+# Control Panel > Programs and Features / winget list ultimately reads from.
+# KNOWN GAPS, stated plainly: this only sees software with a traditional
+# uninstall entry -- it will miss most UWP/Microsoft Store apps (different
+# registration mechanism entirely) and portable/xcopy-deployed applications
+# that never write an uninstall key. That's a real, acceptable limitation
+# for a first pass at this evidence requirement, not a silent gap.
+$software = Try-Section -Name 'software' -Body {
+    $paths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    $apps = foreach ($p in $paths) {
+        Get-ItemProperty -Path $p -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -and $_.DisplayName.Trim() -ne '' } |
+            Select-Object @{N = 'name'; E = { $_.DisplayName } },
+                          @{N = 'version'; E = { $_.DisplayVersion } },
+                          @{N = 'publisher'; E = { $_.Publisher } }
+    }
+    @($apps | Sort-Object name -Unique)
+}
+if ($null -eq $software) { $software = @() }
+
 [pscustomobject]@{
     hostname           = $env:COMPUTERNAME
     ip_address         = $ipv4
@@ -82,6 +109,7 @@ if ($null -eq $secProducts) {
         defender_realtime   = if ($defender) { [bool]$defender.RealTimeProtectionEnabled } else { $null }
         defender_sigs_updated = if ($defender) { "$($defender.AntivirusSignatureLastUpdated)" } else { $null }
         firewall_profiles   = $fwProfiles
+        installed_software  = $software
         collected_utc       = (Get-Date).ToUniversalTime().ToString('o')
         collection_errors   = $errors
     }

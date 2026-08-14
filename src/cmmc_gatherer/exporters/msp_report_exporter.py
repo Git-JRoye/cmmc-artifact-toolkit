@@ -36,8 +36,8 @@ Further fixes after reviewing real generated reports:
     instead of one undifferentiated comma-separated list mixing e.g.
     password-policy failures with two dozen individual audit subcategories.
 
-Further fixes after the second real pilot run (device double-counting and
-misleading full-coverage scores):
+Further fixes after a real pilot run (device double-counting and misleading
+full-coverage scores):
   - Endpoints merged across on-prem and Intune by the orchestrator (matched
     by hostname) now show their Intune compliance/encryption signal inline
     in the on-prem table (a new "Also Cloud-Managed" column) instead of that
@@ -78,6 +78,19 @@ Further fixes after adding real cloud policy/event collectors:
     Intune Configuration Profile) so a failing policy of either type gets
     real, type-specific guidance instead of the generic "via Group Policy"
     fallback recommendation, which doesn't apply to cloud policies at all.
+
+Further additions for CM.L2-3.4.1 (system baselining/inventory) and
+AU.L2-3.3.7 (time synchronization):
+  - Both endpoint tables (on-prem and Intune) now show an "Installed
+    Software" column — a collapsed, expandable <details> list per device
+    rather than always-visible rows, so a device with 100+ packages doesn't
+    bloat the report by default while the full inventory is still genuinely
+    present as evidence. _software_list() prefers the on-prem registry-based
+    inventory over Intune's detectedApps for a merged hybrid device, since
+    the two would otherwise mostly duplicate each other.
+  - New finding type "Time Synchronization" (from the on-prem policy
+    collector's new w32tm check) gets real, specific guidance instead of
+    the generic policy-type fallback.
 """
 
 import logging
@@ -109,6 +122,12 @@ class MSPReportExporter(ExporterBase):
     ) -> bool:
         try:
             html_content = self._generate_msp_report(artifacts, customer_name, assessment_id)
+            # Explicit UTF-8 write: without it, Python falls back to the
+            # platform's default encoding (often cp1252 on Windows), which
+            # mis-encodes the em-dashes used throughout this template. The
+            # browser then renders those bytes as UTF-8 (its own default for
+            # a local file with no declared charset) and produces garbled
+            # "�" characters — confirmed against a real generated report.
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(html_content)
             logger.info(f"Exported MSP report: {output_path}")
@@ -278,6 +297,7 @@ class MSPReportExporter(ExporterBase):
                 <tr>
                     <th>Hostname</th><th>IP Address</th><th>OS Version</th>
                     <th>Firewall</th><th>Antivirus</th><th>Also Cloud-Managed (Intune)</th>
+                    <th>Installed Software</th>
                 </tr>
 """
             for ep in onprem_eps:
@@ -305,6 +325,7 @@ class MSPReportExporter(ExporterBase):
                     f"<td><span style=\"color:{fw_color}\">{ep.firewall_status or 'Unknown'}{fw_note}</span></td>"
                     f"<td><span style=\"color:{av_color}\">{ep.antivirus_status or 'Unknown'}</span></td>"
                     f"<td>{cloud_cell}</td>"
+                    f"<td>{self._software_cell(ep)}</td>"
                     f"</tr>\n"
                 )
             html += "            </table>\n        </div>\n"
@@ -316,6 +337,7 @@ class MSPReportExporter(ExporterBase):
                 <tr>
                     <th>Hostname</th><th>OS Version</th><th>Compliance State</th>
                     <th>Encrypted</th><th>Management State</th><th>Owner</th>
+                    <th>Installed Software</th>
                 </tr>
 """
             for ep in cloud_eps:
@@ -329,7 +351,8 @@ class MSPReportExporter(ExporterBase):
                     f"<td><span style=\"color:{comp_color}\">{meta.get('compliance_state', 'Unknown')}</span></td>"
                     f"<td><span style=\"color:{enc_color}\">{enc}</span></td>"
                     f"<td>{meta.get('management_state', 'Unknown')}</td>"
-                    f"<td>{meta.get('owner_upn', 'Unknown')}</td></tr>\n"
+                    f"<td>{meta.get('owner_upn', 'Unknown')}</td>"
+                    f"<td>{self._software_cell(ep)}</td></tr>\n"
                 )
             html += "            </table>\n        </div>\n"
 
@@ -549,6 +572,48 @@ class MSPReportExporter(ExporterBase):
         profiles = (ep.metadata or {}).get('firewall_profiles') or []
         return [p.get('Name', 'Unknown') for p in profiles if not p.get('Enabled')]
 
+    @staticmethod
+    def _software_list(ep: Any) -> List[Dict[str, Any]]:
+        """Return this endpoint's installed-software inventory (CM.L2-3.4.1
+        evidence) regardless of whether it came from the on-prem registry
+        scan or Intune's detectedApps, and regardless of whether this is a
+        standalone or merged (orchestrator._merge_endpoints) record.
+
+        For a merged hybrid device, the on-prem list (top-level metadata) is
+        preferred over the nested Intune one — the registry-based on-prem
+        scan is generally more complete than Intune's detected-apps list, so
+        showing both would mostly just duplicate the same entries twice
+        rather than add real information.
+        """
+        meta = ep.metadata or {}
+        direct = meta.get('installed_software')
+        if direct:
+            return direct
+        intune = meta.get('intune') or {}
+        return intune.get('installed_software') or []
+
+    @staticmethod
+    def _software_cell(ep: Any) -> str:
+        """Render a collapsed, expandable software list for one table cell.
+        Uses a plain <details>/<summary> element — valid, semantic HTML5
+        that needs no JavaScript to expand/collapse, so it works the same in
+        a static exported report as it would in a live browser tab."""
+        software = MSPReportExporter._software_list(ep)
+        if not software:
+            return '<span class="na">Not collected</span>'
+        items = "".join(
+            "<li>" + s.get('name', 'Unknown')
+            + (f" — {s.get('version')}" if s.get('version') else "")
+            + (f" ({s.get('publisher')})" if s.get('publisher') else "")
+            + "</li>"
+            for s in software
+        )
+        return (
+            f'<details><summary>{len(software)} package(s)</summary>'
+            f'<ul style="margin:6px 0 0 18px;font-size:0.85em;max-height:200px;'
+            f'overflow-y:auto;">{items}</ul></details>'
+        )
+
     def _generate_findings(self, artifacts: Any) -> List[Dict[str, str]]:
         findings = []
         onprem_eps = self._onprem_endpoints(artifacts)
@@ -727,6 +792,13 @@ class MSPReportExporter(ExporterBase):
                 'in the Intune admin center. Common causes include a device being '
                 'offline, failing a prerequisite, or an OS version incompatible with the '
                 'profile\'s settings.',
+            ),
+            'Time Synchronization': (
+                'Time Synchronization Not Configured', 'Medium',
+                'Configure the Windows Time service (w32tm) to synchronize with a '
+                'reliable time source — an NTP server, or the domain hierarchy if '
+                'domain-joined. Accurate, synchronized time stamps are required for '
+                'meaningful audit log correlation across systems (AU.L2-3.3.7).',
             ),
         }
         for policy_type, names in failing_by_type.items():

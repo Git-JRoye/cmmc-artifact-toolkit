@@ -136,5 +136,11 @@ class EndpointCollector(CollectorBase):
             security_products=["Windows Defender"],
             firewall_status="Enabled",
             antivirus_status="Active",
-            metadata={"demo": True},
+            metadata={
+                "demo": True,
+                "installed_software": [
+                    {"name": "Google Chrome", "version": "126.0.0.0", "publisher": "Google LLC"},
+                    {"name": "7-Zip", "version": "23.01", "publisher": "Igor Pavlov"},
+                ],
+            },
         )

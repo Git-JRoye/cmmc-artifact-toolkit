@@ -3,12 +3,13 @@
     Collects Windows security policy configuration for the CMMC gatherer.
 .DESCRIPTION
     Emits a single JSON object to stdout: { "policies": [...], "collection_errors": [...] }.
-    Covers four areas, each wrapped independently so one failing section never
+    Covers five areas, each wrapped independently so one failing section never
     aborts the rest:
       1. Password / account lockout policy  (via secedit /export)
       2. UAC settings                       (registry, HKLM Policies\System)
       3. Audit policy, CMMC-relevant categories only (via auditpol /get /r)
       4. Applied Group Policy Objects, name list only (via gpresult /r)
+      5. Time synchronization source (via w32tm /query /status) -- AU.L2-3.3.7
 
     #4 is intentionally a lightweight "which GPOs applied" list, not a full
     Resultant Set of Policy parse — that's a documented gap, not an oversight;
@@ -142,6 +143,47 @@ Try-Section -Name 'applied_gpos' -Body {
         target = 'Computer'; value = ($names -join '; ')
         description = 'Name list of GPOs applied to this computer (not a full RSOP parse)'
         last_applied = $lastApplied
+    }
+}
+
+# --- 5. Time synchronization (AU.L2-3.3.7: internal clocks must compare
+# and synchronize against an authoritative source) ---
+Try-Section -Name 'time_sync' -Body {
+    $raw = & w32tm /query /status 2>&1
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        # w32tm not responding usually means the Windows Time service itself
+        # is stopped/disabled -- treated as "not synchronized," not skipped,
+        # since that's the actual security-relevant state.
+        $script:policies += [pscustomobject]@{
+            policy_name = 'TimeSynchronization'; policy_type = 'Time Synchronization'
+            status = 'Disabled'; target = 'Computer'
+            value = 'w32tm did not respond (Windows Time service may be stopped)'
+            description = 'Internal clock synchronization with an authoritative time source'
+            last_applied = $null
+        }
+        return
+    }
+
+    $sourceLine = $raw | Where-Object { $_ -match '^Source:' } | Select-Object -First 1
+    $source = if ($sourceLine) { ($sourceLine -replace '^Source:\s*', '').Trim() } else { $null }
+
+    # Deliberately an ALLOWLIST OF KNOWN-BAD states, not a list of known-good
+    # ones -- there are too many legitimate source values to enumerate (an
+    # NTP pool hostname, "VM IC Time Synchronization Provider" on a Hyper-V
+    # guest, a specific domain controller name when domain-joined via NT5DS).
+    # Anything not explicitly a known non-sync state is treated as
+    # configured, with the real source name preserved in `value` for a human
+    # to judge rather than this script guessing about it.
+    $noSyncStates = @('Free-running System Clock', 'Local CMOS Clock', '')
+    $configured = $source -and ($noSyncStates -notcontains $source)
+
+    $script:policies += [pscustomobject]@{
+        policy_name = 'TimeSynchronization'; policy_type = 'Time Synchronization'
+        status = if ($configured) { 'Enabled' } else { 'Disabled' }
+        target = 'Computer'; value = $source
+        description = 'Internal clock synchronization with an authoritative time source'
+        last_applied = $null
     }
 }
 
