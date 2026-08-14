@@ -94,6 +94,7 @@ AU.L2-3.3.7 (time synchronization):
 """
 
 import logging
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -109,6 +110,81 @@ logger = logging.getLogger(__name__)
 _CLOUD_POLICY_TYPES = ('Conditional Access', 'Intune Configuration Profile')
 _CLOUD_EVENT_SOURCES = ('Entra Sign-In Logs', 'Entra Directory Audit Logs')
 
+# Shared stylesheet for both the main report and the standalone software
+# inventory page, so a visual change (or the "make it look more
+# professional" redesign) only has to happen in one place, not be kept in
+# sync by hand across two f-strings.
+_BASE_CSS = """
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Calibri, 'Segoe UI', Arial, sans-serif;
+                line-height: 1.6; color: #1f2937; background: #ffffff; }
+        .header { background: #1e293b; color: #f1f5f9; padding: 36px 40px;
+                   border-bottom: 4px solid #0f172a; }
+        .header h1 { font-family: Georgia, 'Times New Roman', serif;
+                      font-size: 2em; font-weight: normal; letter-spacing: 0.3px; }
+        .header .subtitle { font-size: 1em; color: #94a3b8; margin-top: 6px;
+                             text-transform: uppercase; letter-spacing: 1.5px; }
+        .content { max-width: 920px; margin: 0 auto; padding: 40px 30px; }
+        .section { margin: 34px 0; page-break-inside: avoid; }
+        .section h2 { font-family: Georgia, 'Times New Roman', serif; font-weight: normal;
+                       font-size: 1.3em; color: #1e293b; border-bottom: 1px solid #cbd5e1;
+                       padding-bottom: 8px; margin-bottom: 14px; letter-spacing: 0.2px; }
+        .domain-nav h3 { font-family: Georgia, 'Times New Roman', serif; font-weight: normal;
+                          font-size: 1.15em; color: #1e293b; margin-bottom: 10px; }
+        .score-card { display: flex; margin: 16px 0; }
+        .score { background: #f8fafc; border: 1px solid #e2e8f0; padding: 24px;
+                 text-align: center; flex: 1; }
+        .score .number { font-size: 2.6em; font-weight: 600; color: #1e293b; }
+        .score .label { color: #64748b; margin-top: 6px; font-size: 0.9em;
+                        text-transform: uppercase; letter-spacing: 0.8px; }
+        .score.good { border-left: 4px solid #2f7d4f; }
+        .score.good .number { color: #2f7d4f; }
+        .score.warning { border-left: 4px solid #b7791f; }
+        .score.warning .number { color: #b7791f; }
+        .score.critical { border-left: 4px solid #b3261e; }
+        .score.critical .number { color: #b3261e; }
+        .finding { margin: 12px 0; padding: 14px 16px; border-left: 3px solid #b7791f;
+                   background: #fafaf9; }
+        .finding.critical { border-left-color: #b3261e; background: #fdf7f6; }
+        .finding.resolved { border-left-color: #2f7d4f; background: #f6faf7; }
+        .finding h4 { margin-bottom: 4px; font-size: 1em; color: #1e293b; }
+        .finding p { font-size: 0.92em; line-height: 1.5; color: #334155; }
+        table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 0.92em; }
+        th { background: #f1f5f9; color: #334155; padding: 10px 12px; text-align: left;
+              border-bottom: 2px solid #cbd5e1; font-weight: 600; font-size: 0.85em;
+              text-transform: uppercase; letter-spacing: 0.4px; }
+        td { padding: 9px 12px; border-bottom: 1px solid #e2e8f0; }
+        tr:nth-child(even) td { background: #fafbfc; }
+        .recommendation { background: #f8fafc; padding: 12px 16px;
+                          border-left: 3px solid #3b5b7a; margin: 8px 0 20px 0; font-size: 0.92em; }
+        .alert-critical { border-left: 3px solid #b3261e; background: #fdf7f6;
+                           padding: 12px 16px; margin-top: 14px; font-size: 0.92em; }
+        .footer { background: #f8fafc; padding: 20px; text-align: center;
+                  margin-top: 40px; border-top: 1px solid #e2e8f0; color: #64748b; font-size: 0.88em; }
+        .summary-table td { padding: 7px 10px; }
+        .summary-table td:first-child { font-weight: 600; width: 32%; color: #475569; }
+        .na { color: #94a3b8; font-style: italic; }
+        .status-good { color: #2f7d4f; font-weight: 600; }
+        .status-bad { color: #b3261e; font-weight: 600; }
+        .status-warn { color: #b7791f; font-weight: 600; }
+        .status-neutral { color: #94a3b8; }
+        .control-badges { margin: 4px 0 14px 0; font-size: 0.82em; }
+        .badge { display: inline-block; padding: 1px 8px; border-radius: 3px;
+                 margin-right: 6px; margin-bottom: 4px; font-weight: 600; font-size: 0.95em;
+                 border: 1px solid; }
+        .badge.direct { background: #f0f4f8; color: #2c4a6b; border-color: #c3d4e3; }
+        .badge.supporting { background: #faf6ef; color: #8a5a1f; border-color: #e5d2b0; }
+        .confidence-key { font-size: 0.85em; color: #64748b; margin: 8px 0 14px 0; }
+        .domain-nav { background: #f8fafc; border: 1px solid #e2e8f0; padding: 18px 22px;
+                       margin: 18px 0; }
+        .domain-nav ul { margin: 0 0 10px 20px; }
+        .domain-nav li { margin-bottom: 4px; }
+        .domain-nav a { color: #2c4a6b; text-decoration: none; border-bottom: 1px dotted #2c4a6b; }
+        .domain-nav a:hover { border-bottom-style: solid; }
+        details summary { cursor: pointer; color: #2c4a6b; font-size: 0.92em; }
+        .back-link { display: inline-block; margin-bottom: 20px; font-size: 0.92em; }
+"""
+
 
 class MSPReportExporter(ExporterBase):
     """Exports a professional HTML compliance report suitable for MSP client presentation."""
@@ -122,7 +198,29 @@ class MSPReportExporter(ExporterBase):
         **_,
     ) -> bool:
         try:
-            html_content = self._generate_msp_report(artifacts, customer_name, assessment_id)
+            # The software inventory lives in its own file, sitting next to
+            # the main report, so it can be regenerated/updated on its own
+            # without touching the main compliance report at all — it was
+            # moved out because it will only keep growing as more devices
+            # and software get collected. Filename is derived from the
+            # main report's own path so the two always stay associated
+            # without the caller needing to coordinate two separate paths.
+            base, ext = os.path.splitext(output_path)
+            ext = ext or '.html'
+            software_path = f"{base}_software{ext}"
+            main_filename = os.path.basename(output_path)
+            software_filename = os.path.basename(software_path)
+
+            onprem_eps = self._onprem_endpoints(artifacts)
+            cloud_eps = self._cloud_endpoints(artifacts)
+            ad_users = self._ad_users(artifacts)
+            present_evidence = self._present_evidence_keys(artifacts, onprem_eps, cloud_eps, ad_users)
+            has_software = 'installed_software' in present_evidence
+
+            html_content = self._generate_msp_report(
+                artifacts, customer_name, assessment_id,
+                software_href=software_filename if has_software else None,
+            )
             # Explicit UTF-8 write: without it, Python falls back to the
             # platform's default encoding (often cp1252 on Windows), which
             # mis-encodes the em-dashes used throughout this template. The
@@ -132,6 +230,15 @@ class MSPReportExporter(ExporterBase):
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(html_content)
             logger.info(f"Exported MSP report: {output_path}")
+
+            if has_software:
+                software_html = self._generate_software_inventory_page(
+                    artifacts, customer_name, assessment_id, back_href=main_filename,
+                )
+                with open(software_path, 'w', encoding='utf-8') as f:
+                    f.write(software_html)
+                logger.info(f"Exported software inventory: {software_path}")
+
             return True
         except Exception as e:
             logger.error(f"MSP report export failed: {e}")
@@ -161,6 +268,7 @@ class MSPReportExporter(ExporterBase):
         artifacts: Any,
         customer_name: Optional[str],
         assessment_id: Optional[str],
+        software_href: Optional[str] = None,
     ) -> str:
         compliance_score = ComplianceScorer.calculate_overall_score(artifacts)
         coverage = ComplianceScorer.calculate_coverage(artifacts)
@@ -217,75 +325,7 @@ class MSPReportExporter(ExporterBase):
 <head>
     <meta charset="UTF-8">
     <title>CMMC Compliance Assessment Report</title>
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{ font-family: Calibri, 'Segoe UI', Arial, sans-serif;
-                line-height: 1.6; color: #1f2937; background: #ffffff; }}
-        .header {{ background: #1e293b; color: #f1f5f9; padding: 36px 40px;
-                   border-bottom: 4px solid #0f172a; }}
-        .header h1 {{ font-family: Georgia, 'Times New Roman', serif;
-                      font-size: 2em; font-weight: normal; letter-spacing: 0.3px; }}
-        .header .subtitle {{ font-size: 1em; color: #94a3b8; margin-top: 6px;
-                             text-transform: uppercase; letter-spacing: 1.5px; }}
-        .content {{ max-width: 920px; margin: 0 auto; padding: 40px 30px; }}
-        .section {{ margin: 34px 0; page-break-inside: avoid; }}
-        .section h2 {{ font-family: Georgia, 'Times New Roman', serif; font-weight: normal;
-                       font-size: 1.3em; color: #1e293b; border-bottom: 1px solid #cbd5e1;
-                       padding-bottom: 8px; margin-bottom: 14px; letter-spacing: 0.2px; }}
-        .domain-nav h3 {{ font-family: Georgia, 'Times New Roman', serif; font-weight: normal;
-                          font-size: 1.15em; color: #1e293b; margin-bottom: 10px; }}
-        .score-card {{ display: flex; margin: 16px 0; }}
-        .score {{ background: #f8fafc; border: 1px solid #e2e8f0; padding: 24px;
-                 text-align: center; flex: 1; }}
-        .score .number {{ font-size: 2.6em; font-weight: 600; color: #1e293b; }}
-        .score .label {{ color: #64748b; margin-top: 6px; font-size: 0.9em;
-                        text-transform: uppercase; letter-spacing: 0.8px; }}
-        .score.good {{ border-left: 4px solid #2f7d4f; }}
-        .score.good .number {{ color: #2f7d4f; }}
-        .score.warning {{ border-left: 4px solid #b7791f; }}
-        .score.warning .number {{ color: #b7791f; }}
-        .score.critical {{ border-left: 4px solid #b3261e; }}
-        .score.critical .number {{ color: #b3261e; }}
-        .finding {{ margin: 12px 0; padding: 14px 16px; border-left: 3px solid #b7791f;
-                   background: #fafaf9; }}
-        .finding.critical {{ border-left-color: #b3261e; background: #fdf7f6; }}
-        .finding.resolved {{ border-left-color: #2f7d4f; background: #f6faf7; }}
-        .finding h4 {{ margin-bottom: 4px; font-size: 1em; color: #1e293b; }}
-        .finding p {{ font-size: 0.92em; line-height: 1.5; color: #334155; }}
-        table {{ width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 0.92em; }}
-        th {{ background: #f1f5f9; color: #334155; padding: 10px 12px; text-align: left;
-              border-bottom: 2px solid #cbd5e1; font-weight: 600; font-size: 0.85em;
-              text-transform: uppercase; letter-spacing: 0.4px; }}
-        td {{ padding: 9px 12px; border-bottom: 1px solid #e2e8f0; }}
-        tr:nth-child(even) td {{ background: #fafbfc; }}
-        .recommendation {{ background: #f8fafc; padding: 12px 16px;
-                          border-left: 3px solid #3b5b7a; margin: 8px 0 20px 0; font-size: 0.92em; }}
-        .alert-critical {{ border-left: 3px solid #b3261e; background: #fdf7f6;
-                           padding: 12px 16px; margin-top: 14px; font-size: 0.92em; }}
-        .footer {{ background: #f8fafc; padding: 20px; text-align: center;
-                  margin-top: 40px; border-top: 1px solid #e2e8f0; color: #64748b; font-size: 0.88em; }}
-        .summary-table td {{ padding: 7px 10px; }}
-        .summary-table td:first-child {{ font-weight: 600; width: 32%; color: #475569; }}
-        .na {{ color: #94a3b8; font-style: italic; }}
-        .status-good {{ color: #2f7d4f; font-weight: 600; }}
-        .status-bad {{ color: #b3261e; font-weight: 600; }}
-        .status-warn {{ color: #b7791f; font-weight: 600; }}
-        .status-neutral {{ color: #94a3b8; }}
-        .control-badges {{ margin: 4px 0 14px 0; font-size: 0.82em; }}
-        .badge {{ display: inline-block; padding: 1px 8px; border-radius: 3px;
-                 margin-right: 6px; margin-bottom: 4px; font-weight: 600; font-size: 0.95em;
-                 border: 1px solid; }}
-        .badge.direct {{ background: #f0f4f8; color: #2c4a6b; border-color: #c3d4e3; }}
-        .badge.supporting {{ background: #faf6ef; color: #8a5a1f; border-color: #e5d2b0; }}
-        .confidence-key {{ font-size: 0.85em; color: #64748b; margin: 8px 0 14px 0; }}
-        .domain-nav {{ background: #f8fafc; border: 1px solid #e2e8f0; padding: 18px 22px;
-                       margin: 18px 0; }}
-        .domain-nav ul {{ margin: 0 0 10px 20px; }}
-        .domain-nav li {{ margin-bottom: 4px; }}
-        .domain-nav a {{ color: #2c4a6b; text-decoration: none; border-bottom: 1px dotted #2c4a6b; }}
-        .domain-nav a:hover {{ border-bottom-style: solid; }}
-        details summary {{ cursor: pointer; color: #2c4a6b; font-size: 0.92em; }}
-    </style>
+    <style>{_BASE_CSS}</style>
 </head>
 <body>
     <div class="header">
@@ -367,7 +407,7 @@ class MSPReportExporter(ExporterBase):
                     f"<td><span class=\"{fw_color}\">{ep.firewall_status or 'Unknown'}{fw_note}</span></td>"
                     f"<td><span class=\"{av_color}\">{ep.antivirus_status or 'Unknown'}</span></td>"
                     f"<td>{cloud_cell}</td>"
-                    f"<td>{self._software_cell(ep)}</td>"
+                    f"<td>{self._software_cell(ep, software_href)}</td>"
                     f"</tr>\n"
                 )
             html += "            </table>\n        </div>\n"
@@ -394,7 +434,7 @@ class MSPReportExporter(ExporterBase):
                     f"<td><span class=\"{enc_color}\">{enc}</span></td>"
                     f"<td>{meta.get('management_state', 'Unknown')}</td>"
                     f"<td>{meta.get('owner_upn', 'Unknown')}</td>"
-                    f"<td>{self._software_cell(ep)}</td></tr>\n"
+                    f"<td>{self._software_cell(ep, software_href)}</td></tr>\n"
                 )
             html += "            </table>\n        </div>\n"
 
@@ -535,7 +575,7 @@ class MSPReportExporter(ExporterBase):
                 )
             html += "            </table>\n        </div>\n"
 
-        html += self._generate_software_inventory_html(artifacts, present_evidence)
+        html += self._generate_software_summary_link_html(artifacts, present_evidence, software_href)
         html += self._generate_security_events_html(artifacts, present_evidence)
 
         scope_items = []
@@ -814,33 +854,63 @@ class MSPReportExporter(ExporterBase):
         )
         return f'<div class="control-badges">Satisfies: {badges}</div>'
 
-    def _generate_software_inventory_html(self, artifacts: Any, present_evidence: List[str]) -> str:
-        """A single consolidated software inventory across every endpoint —
-        on-prem and cloud alike — as its own dedicated section/page, in
-        addition to the per-device expandable lists already shown in the
-        endpoint tables. Not strictly required by CM.L2-3.4.1's assessment
-        objectives (those just require the inventory to exist and be
-        maintained, which the per-device view already satisfies), but a
-        single consolidated view is a more useful document to actually hand
-        an assessor than hunting through per-device <details> elements.
+    def _software_inventory_data(self, artifacts: Any) -> tuple:
+        """Shared computation for both the main report's short summary and
+        the standalone software-inventory page, so the two can never
+        disagree about counts or which devices are missing and why.
 
-        Deduplicated by (name, version, publisher) — genuinely different
-        versions of the same package across hosts are shown as separate
-        rows on purpose, since that IS meaningfully different information,
-        not noise to collapse away.
+        Returns (grouped, by_status):
+          grouped   — {(name, version, publisher): [hostnames]}, deduplicated
+          by_status — {status: [hostnames]} for every non-'ok' endpoint,
+                      grouped by _software_status
         """
-        if 'installed_software' not in present_evidence:
-            return ""
-
         grouped: Dict[tuple, List[str]] = {}
         for ep in artifacts.endpoints:
             for s in self._software_list(ep):
                 key = (s.get('name', 'Unknown'), s.get('version') or '', s.get('publisher') or '')
                 grouped.setdefault(key, []).append(ep.hostname)
 
-        if not grouped:
-            return ""
+        by_status: Dict[str, List[str]] = {}
+        for ep in artifacts.endpoints:
+            status = self._software_status(ep)
+            if status != 'ok':
+                by_status.setdefault(status, []).append(ep.hostname)
 
+        return grouped, by_status
+
+    @staticmethod
+    def _software_status_notes_html(by_status: Dict[str, List[str]]) -> str:
+        """Explain any device NOT contributing to the software inventory,
+        grouped by why — so a client/assessor (or you, six months from now)
+        doesn't have to guess whether "only one device shows software" is a
+        bug or a real device state."""
+        status_notes = []
+        if by_status.get('failed'):
+            status_notes.append(
+                f"<li><strong>Collection failed</strong> for: {', '.join(sorted(by_status['failed']))}. "
+                f"The collector's Graph/PowerShell call errored for these devices — check the "
+                f"collection console log for the specific error.</li>"
+            )
+        if by_status.get('empty_confirmed'):
+            status_notes.append(
+                f"<li><strong>Confirmed empty</strong> for: {', '.join(sorted(by_status['empty_confirmed']))}. "
+                f"Collection succeeded, but no software was inventoried — for Intune-managed devices this "
+                f"commonly means the device hasn't completed an app-inventory sync yet, which is a real "
+                f"device state, not a collection error.</li>"
+            )
+        if by_status.get('not_attempted'):
+            status_notes.append(
+                f"<li><strong>Not attempted</strong> for: {', '.join(sorted(by_status['not_attempted']))}.</li>"
+            )
+        if not status_notes:
+            return ""
+        return (
+            '<div class="recommendation"><strong>Devices not contributing to the inventory above, and why:</strong>'
+            f'<ul>{"".join(status_notes)}</ul></div>'
+        )
+
+    @staticmethod
+    def _software_table_rows_html(grouped: Dict[tuple, List[str]]) -> str:
         rows = []
         for (name, version, publisher), hosts in sorted(grouped.items(), key=lambda kv: kv[0][0].lower()):
             unique_hosts = sorted(set(hosts))
@@ -849,18 +919,76 @@ class MSPReportExporter(ExporterBase):
                 f"<td>{publisher or '<span class=\"na\">Unknown</span>'}</td>"
                 f"<td>{', '.join(unique_hosts)}</td></tr>\n"
             )
+        return "".join(rows)
+
+    def _generate_software_summary_link_html(self, artifacts: Any, present_evidence: List[str],
+                                              software_href: Optional[str]) -> str:
+        """Short in-main-report summary: counts, the "why is a device
+        missing" disclosure (kept inline since it's short and directly
+        answers a real question), and a link out to the standalone page
+        that holds the full, potentially very long table. Previously the
+        full table lived inline here too — moved out because it will only
+        keep growing as more devices/software get collected, and updating
+        the software list shouldn't require regenerating the whole
+        compliance report."""
+        if 'installed_software' not in present_evidence:
+            return ""
+
+        grouped, by_status = self._software_inventory_data(artifacts)
+        if not grouped:
+            return ""
 
         badge = self._satisfies_badge_html(['installed_software'], present_evidence)
+        notes_html = self._software_status_notes_html(by_status)
+        href = software_href or "software_inventory.html"
         return f"""        <div class="section" id="sec-software-inventory">
             <h2>Installed Software Inventory</h2>
             {badge}
+            <p>{len(grouped)} unique software package(s) across {len(artifacts.endpoints)} endpoint(s) —
+            see the full list in <a href="{href}">{href}</a>.</p>
+            {notes_html}
+        </div>
+"""
+
+    def _generate_software_inventory_page(self, artifacts: Any, customer_name: Optional[str],
+                                           assessment_id: Optional[str], back_href: str) -> str:
+        """The standalone software-inventory page itself — a complete,
+        self-contained HTML document (same shared stylesheet as the main
+        report) so it can be regenerated and updated independently without
+        touching the main compliance report at all."""
+        grouped, by_status = self._software_inventory_data(artifacts)
+        rows_html = self._software_table_rows_html(grouped)
+        notes_html = self._software_status_notes_html(by_status)
+        customer_name = customer_name or "Unnamed Customer"
+        assessment_id = assessment_id or "CMMC-" + datetime.now().strftime("%Y%m%d%H%M%S")
+
+        return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Installed Software Inventory — {customer_name}</title>
+    <style>{_BASE_CSS}</style>
+</head>
+<body>
+    <div class="header">
+        <h1>Installed Software Inventory</h1>
+        <div class="subtitle">{customer_name} — {assessment_id}</div>
+    </div>
+    <div class="content">
+        <p class="back-link"><a href="{back_href}">&larr; Back to main compliance report</a></p>
+        <div class="section" id="sec-software-inventory-table">
+            <h2>Software Packages</h2>
             <p>{len(grouped)} unique software package(s) across {len(artifacts.endpoints)} endpoint(s).</p>
             <table>
                 <tr><th>Name</th><th>Version</th><th>Publisher</th><th>Found On</th></tr>
-{"".join(rows)}
+{rows_html}
             </table>
+            {notes_html}
         </div>
-"""
+        <p class="back-link"><a href="{back_href}">&larr; Back to main compliance report</a></p>
+    </div>
+</body>
+</html>"""
 
     def _generate_security_events_html(self, artifacts: Any, present_evidence: List[str]) -> str:
         """Security events were being collected and scored but never
@@ -1005,26 +1133,59 @@ class MSPReportExporter(ExporterBase):
         return intune.get('installed_software') or []
 
     @staticmethod
-    def _software_cell(ep: Any) -> str:
-        """Render a collapsed, expandable software list for one table cell.
-        Uses a plain <details>/<summary> element — valid, semantic HTML5
-        that needs no JavaScript to expand/collapse, so it works the same in
-        a static exported report as it would in a live browser tab."""
-        software = MSPReportExporter._software_list(ep)
-        if not software:
-            return '<span class="na">Not collected</span>'
-        items = "".join(
-            "<li>" + s.get('name', 'Unknown')
-            + (f" — {s.get('version')}" if s.get('version') else "")
-            + (f" ({s.get('publisher')})" if s.get('publisher') else "")
-            + "</li>"
-            for s in software
-        )
-        return (
-            f'<details><summary>{len(software)} package(s)</summary>'
-            f'<ul style="margin:6px 0 0 18px;font-size:0.85em;max-height:200px;'
-            f'overflow-y:auto;">{items}</ul></details>'
-        )
+    def _software_status(ep: Any) -> str:
+        """Distinguish WHY an endpoint's software list might be empty —
+        previously "collection failed" and "genuinely no software
+        inventoried yet" both collapsed into the same "Not collected" cell,
+        which is exactly what made it impossible to tell, from the report
+        alone, whether only one device out of several showing software was
+        a real bug or a real gap in that device's own Intune inventory sync.
+
+        Returns one of:
+          'ok'               — real software data present
+          'empty_confirmed'  — collection succeeded; device genuinely has
+                                no inventoried software (e.g. hasn't
+                                completed an Intune app-inventory sync yet —
+                                a real device state, not an error)
+          'failed'           — the collection attempt itself errored
+          'not_attempted'    — no software collection ran for this endpoint
+                                at all (e.g. a plane/collector that doesn't
+                                gather this)
+        """
+        meta = ep.metadata or {}
+        intune = meta.get('intune') or {}
+
+        for source in (meta, intune):
+            if 'installed_software' in source:
+                if source.get('software_collection_failed'):
+                    return 'failed'
+                return 'ok' if source['installed_software'] else 'empty_confirmed'
+
+        # On-prem: a software-section failure shows up in collection_errors
+        # (Try-Section prefixes it "software: ..."), which is already
+        # collected but wasn't being checked here.
+        errors = meta.get('collection_errors') or []
+        if any('software' in e.lower() for e in errors):
+            return 'failed'
+        return 'not_attempted'
+
+    @staticmethod
+    def _software_cell(ep: Any, software_href: Optional[str] = None) -> str:
+        """A count + jump-link to the consolidated Installed Software
+        Inventory — now the standalone page, linked via software_href, not
+        an in-page anchor (the full table no longer lives in the main
+        report at all). Falls back to a same-page anchor only if no href
+        was supplied (e.g. a direct call bypassing export())."""
+        status = MSPReportExporter._software_status(ep)
+        if status == 'ok':
+            count = len(MSPReportExporter._software_list(ep))
+            href = f"{software_href}#sec-software-inventory-table" if software_href else "#sec-software-inventory"
+            return f'<a href="{href}">{count} package(s)</a>'
+        if status == 'empty_confirmed':
+            return '<span class="na">None detected</span>'
+        if status == 'failed':
+            return '<span class="status-bad">Collection failed</span>'
+        return '<span class="na">Not collected</span>'
 
     @staticmethod
     def _group_names_from_memberships(memberships: List[str]) -> List[str]:
