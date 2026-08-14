@@ -72,12 +72,22 @@ class IntuneDeviceCollector(CollectorBase):
         """Per-device software inventory. Failure here is isolated to this one
         device's software list — it never affects the device's own posture
         data collected in _map(), matching this file's overall pattern of
-        never letting one section's failure take down another."""
+        never letting one section's failure take down another.
+
+        PILOT FINDING (real, confirmed): the first version of this call used
+        $select/$top query params and got a 400 Bad Request from every
+        device in a real tenant, identically. The detectedApps navigation
+        property apparently doesn't accept the same query options the
+        top-level managedDevices collection does. Removed both params here
+        as the fix; this itself is unverified against a live tenant as of
+        this edit — if it still fails, the response body is now logged so
+        the next pilot run gives Graph's actual error text instead of a
+        bare "400 Bad Request".
+        """
         apps: List[Dict[str, Any]] = []
         try:
-            params = {"$select": "displayName,version,publisher", "$top": "999"}
             for app in self.graph.get_all(
-                f"deviceManagement/managedDevices/{device_id}/detectedApps", params=params
+                f"deviceManagement/managedDevices/{device_id}/detectedApps"
             ):
                 apps.append({
                     "name": app.get("displayName") or "Unknown",
@@ -85,7 +95,12 @@ class IntuneDeviceCollector(CollectorBase):
                     "publisher": app.get("publisher") or "",
                 })
         except Exception as e:
-            logger.warning("  Could not fetch detected apps for device '%s': %s", hostname, e)
+            detail = getattr(getattr(e, "response", None), "text", None)
+            if detail:
+                logger.warning("  Could not fetch detected apps for device '%s': %s | Response: %s",
+                                hostname, e, detail[:500])
+            else:
+                logger.warning("  Could not fetch detected apps for device '%s': %s", hostname, e)
         return apps
 
     @staticmethod
