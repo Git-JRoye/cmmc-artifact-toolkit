@@ -47,6 +47,19 @@ class ComplianceScorer:
         'ad_security': 20,
     }
 
+    # Human-readable description of what each dimension actually measures,
+    # shown alongside the weight/score breakdown in the report so a client
+    # or assessor never has to take the final percentage on faith — they can
+    # see exactly what was measured, how much it counted, and what it scored.
+    DIMENSION_DESCRIPTIONS = {
+        'firewall': "Windows Firewall enabled across all profiles (Domain/Private/Public) on on-prem endpoints.",
+        'antivirus': "Antivirus / Windows Defender real-time protection active on on-prem endpoints.",
+        'updates': "On-prem endpoints have installed patch/hotfix history recorded (presence check, not recency).",
+        'policies': "Local security policy, UAC, audit policy, Conditional Access, and Intune configuration profiles meeting their individual baselines.",
+        'event_logging': "Ratio of Critical/Error security events to total events collected (lower ratio scores higher).",
+        'ad_security': "AD/Entra accounts that are either disabled or not stale (i.e. actively used and appropriately managed).",
+    }
+
     @classmethod
     def _all_dimension_scores(cls, artifacts: ArtifactCollection) -> Dict[str, Optional[int]]:
         """Single source of truth for the six per-dimension scores, shared by

@@ -25,6 +25,19 @@ Graph API versions over time; this is built against v1.0, which may or may
 not be correct for a given tenant — if the pilot run 404s on this call, the
 fix is likely switching to the beta endpoint, not a logic change.
 
+Group membership enrichment: per-user memberOf (users/{id}/memberOf) is a
+long-stable v1.0 endpoint — meaningfully lower risk than detectedApps, which
+turned out to need /beta on the Intune side. Still genuinely unverified
+against a live tenant as of this writing, so treat it the same way: if it
+404s, check the endpoint version before assuming the logic is wrong.
+SCALABILITY NOTE: same per-user fan-out cost as the privileged-role and MFA
+lookups (N users = N calls) — fine at Tenguard's scale, worth revisiting for
+a large MSP client. memberOf returns groups AND directory roles mixed
+together (a polymorphic directoryObject collection); filtered here to
+#microsoft.graph.group only, since roles are already collected separately
+via _fetch_privileged_role_members and would otherwise be duplicated under a
+different label.
+
 Graph application permissions required for this file's full functionality:
   User.Read.All, Group.Read.All, AuditLog.Read.All (existing)
   RoleManagement.Read.Directory (NEW — for privileged role membership)
@@ -123,6 +136,21 @@ class EntraIdentityCollector(CollectorBase):
                 }
         return result
 
+    # -- group membership enrichment ----------------------------------------
+
+    def _fetch_user_group_memberships(self, user_id: str) -> List[str]:
+        """Per-user group membership via memberOf. Isolated failure — one
+        user's lookup failing never affects another user's data, matching
+        the pattern the other per-item lookups in this file already use."""
+        groups: List[str] = []
+        try:
+            for obj in self.graph.get_all(f"users/{user_id}/memberOf", params={"$select": "id,displayName"}):
+                if obj.get("@odata.type") == "#microsoft.graph.group":
+                    groups.append(obj.get("displayName") or obj.get("id") or "Unnamed Group")
+        except Exception as e:
+            logger.warning("  Could not fetch group memberships for user %s: %s", user_id, e)
+        return groups
+
     # -- users ------------------------------------------------------------
 
     def _collect_users(self, privileged_by_user_id: Dict[str, List[str]],
@@ -143,6 +171,7 @@ class EntraIdentityCollector(CollectorBase):
 
             roles = privileged_by_user_id.get(uid, [])
             mfa = mfa_by_user_id.get(uid)
+            groups = self._fetch_user_group_memberships(uid) if uid else []
 
             out.append(ADObject(
                 distinguished_name=u.get("userPrincipalName") or uid or "unknown",
@@ -163,7 +192,7 @@ class EntraIdentityCollector(CollectorBase):
                     "mfaMethods": mfa.get("methodsRegistered") if mfa else None,
                     "source": "entra",
                 },
-                group_memberships=[],  # per-user memberOf is expensive; Phase-3 enrichment
+                group_memberships=groups,
             ))
         logger.info("  Entra users: %d", len(out))
         return out

@@ -210,6 +210,7 @@ class MSPReportExporter(ExporterBase):
         ad_users_for_evidence = self._ad_users(artifacts)
         present_evidence = self._present_evidence_keys(artifacts, onprem_eps, cloud_eps, ad_users_for_evidence)
         domain_coverage_html = self._build_domain_coverage_html(present_evidence)
+        scoring_breakdown_html = self._build_scoring_breakdown_html(artifacts)
 
         html = f"""<!DOCTYPE html>
 <html>
@@ -314,6 +315,7 @@ class MSPReportExporter(ExporterBase):
                 </div>
             </div>{coverage_banner_html}
         </div>
+{scoring_breakdown_html}
 {domain_coverage_html}
         <div class="section">
             <h2>Infrastructure Overview</h2>
@@ -404,7 +406,7 @@ class MSPReportExporter(ExporterBase):
             <table>
                 <tr>
                     <th>Name</th><th>Source</th><th>Status</th><th>Guest</th>
-                    <th>Stale</th><th>Privileged</th><th>MFA Registered</th>
+                    <th>Stale</th><th>Privileged</th><th>MFA Registered</th><th>Group Memberships</th>
                 </tr>
 """
             for u in ad_users:
@@ -461,7 +463,7 @@ class MSPReportExporter(ExporterBase):
                     f"<td>{guest_cell}</td>"
                     f"<td><span class=\"{stale_color}\">{stale_label}</span></td>"
                     f"<td><span class=\"{priv_color}\">{priv_label}</span></td>"
-                    f"<td>{mfa_cell}</td></tr>\n"
+                    f"<td>{mfa_cell}</td><td>{self._group_memberships_cell(u)}</td></tr>\n"
                 )
             html += "            </table>\n        </div>\n"
 
@@ -659,6 +661,71 @@ class MSPReportExporter(ExporterBase):
             present.append('guest_group_membership')
 
         return present
+
+    def _build_scoring_breakdown_html(self, artifacts: Any) -> str:
+        """Show the actual math behind the overall score — every category,
+        its weight, its individual score (or N/A), and its weighted
+        contribution. Previously this data was computed every run (visible
+        in the console output) but never shown in the report at all — a
+        client or assessor seeing only the final percentage has no way to
+        verify or even understand how it was derived, which is a real
+        problem the moment anyone asks "how did you get this number?"
+        """
+        scores = ComplianceScorer._all_dimension_scores(artifacts)
+        weights = ComplianceScorer.SCORE_WEIGHTS
+        descriptions = ComplianceScorer.DIMENSION_DESCRIPTIONS
+        total_weight = sum(weights.values())
+        applicable_weight = sum(weights[d] for d, s in scores.items() if s is not None)
+
+        rows = []
+        for dim, weight in weights.items():
+            score = scores.get(dim)
+            label = dim.replace('_', ' ').title()
+            desc = descriptions.get(dim, '')
+            if score is None:
+                score_cell = '<span class="na">N/A — no applicable data</span>'
+                contribution_cell = '<span class="na">excluded from calculation</span>'
+            else:
+                score_color = 'status-good' if score >= 80 else ('status-warn' if score >= 60 else 'status-bad')
+                # Contribution shown as % of the FINAL score this category is
+                # responsible for, i.e. its share of the applicable weight —
+                # matches how calculate_overall_score actually renormalizes,
+                # rather than showing a share of the full 100-point scale
+                # that would be wrong whenever coverage is incomplete.
+                share_of_applicable = (weight / applicable_weight * 100) if applicable_weight else 0
+                score_cell = f'<span class="{score_color}">{score}/100</span>'
+                contribution_cell = f'{share_of_applicable:.0f}% of final score'
+            rows.append(
+                f"                <tr><td>{label}</td><td>{weight}</td>"
+                f"<td>{score_cell}</td><td>{contribution_cell}</td>"
+                f"<td style=\"font-size:0.88em;color:#475569;\">{desc}</td></tr>\n"
+            )
+
+        note = ""
+        if applicable_weight < total_weight:
+            note = (
+                f'<p style="font-size:0.88em;color:#64748b;margin-top:10px;">'
+                f'Only categories with applicable data count toward the score — the weights '
+                f'above are renormalized across those {applicable_weight} of {total_weight} '
+                f'total weight points, not the full scale. This is why a tenant assessed on '
+                f'fewer categories can still show a high score: see the Scoring Coverage figure '
+                f'above for how much of the framework that represents.</p>'
+            )
+
+        return f"""        <div class="section">
+            <h2>Scoring Breakdown</h2>
+            <p style="font-size:0.92em;color:#475569;">
+                The overall score is a weighted average across the six categories below.
+                Each category is scored 0-100 independently; categories with no applicable
+                data are excluded from the average entirely rather than counted as a failure.
+            </p>
+            <table>
+                <tr><th>Category</th><th>Weight</th><th>Score</th><th>Share of Final Score</th><th>What It Measures</th></tr>
+{"".join(rows)}
+            </table>
+            {note}
+        </div>
+"""
 
     def _build_domain_coverage_html(self, present_evidence_keys: List[str]) -> str:
         """Render the domain-family navigation section — the "sheets" view.
@@ -956,6 +1023,42 @@ class MSPReportExporter(ExporterBase):
         return (
             f'<details><summary>{len(software)} package(s)</summary>'
             f'<ul style="margin:6px 0 0 18px;font-size:0.85em;max-height:200px;'
+            f'overflow-y:auto;">{items}</ul></details>'
+        )
+
+    @staticmethod
+    def _group_names_from_memberships(memberships: List[str]) -> List[str]:
+        """Extract a readable group name from each raw group_memberships
+        entry. On-prem AD gives full distinguished names (e.g.
+        "CN=Domain Admins,OU=Groups,DC=corp,DC=local") — only the CN=
+        component is shown. Entra's group_memberships already contain plain
+        display names (no DN to parse), so anything without a leading "CN="
+        passes through unchanged."""
+        names = []
+        for m in memberships or []:
+            if m.upper().startswith("CN="):
+                names.append(m.split(",", 1)[0][3:])
+            else:
+                names.append(m)
+        return names
+
+    @staticmethod
+    def _group_memberships_cell(u: Any) -> str:
+        """Render a collapsed, expandable group-membership list for one user
+        row — same <details>/<summary> pattern as _software_cell, since a
+        user can belong to many groups and an always-visible list would
+        make the table unreadable. On-prem: this data was already being
+        collected (LDAP returns memberOf directly, essentially free) but
+        never displayed. Entra: collected via a per-user memberOf call
+        added alongside this display change."""
+        names = MSPReportExporter._group_names_from_memberships(getattr(u, 'group_memberships', None))
+        if not names:
+            return '<span class="na">None recorded</span>'
+        unique_names = sorted(set(names))
+        items = "".join(f"<li>{n}</li>" for n in unique_names)
+        return (
+            f'<details><summary>{len(unique_names)} group(s)</summary>'
+            f'<ul style="margin:6px 0 0 18px;font-size:0.85em;max-height:150px;'
             f'overflow-y:auto;">{items}</ul></details>'
         )
 
