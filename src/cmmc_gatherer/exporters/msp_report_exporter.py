@@ -91,19 +91,6 @@ AU.L2-3.3.7 (time synchronization):
   - New finding type "Time Synchronization" (from the on-prem policy
     collector's new w32tm check) gets real, specific guidance instead of
     the generic policy-type fallback.
-
-Asset-scope integration (CMMC Level 2 Assessment Guide's 5 asset categories):
-  - A new "CMMC Assessment Scope" section (_build_asset_scope_html) renders
-    right after the compliance score, mirroring real CMMC methodology where
-    scope determination precedes everything else. Renders nothing if no
-    asset_scope was configured for the tenant.
-  - CRMA/Specialized-tagged devices/users get an inline badge
-    (_asset_category_note) right in the existing tables, in addition to the
-    dedicated scope section, so the tag is visible wherever that asset
-    already appears.
-  - Out-of-Scope assets are removed entirely upstream (orchestrator +
-    asset_scope.apply_asset_scope) before this exporter ever sees them —
-    this file only renders what's already been filtered.
 """
 
 import logging
@@ -114,6 +101,7 @@ from typing import Any, Dict, List, Optional
 from .base import ExporterBase
 from ..utils.compliance import ComplianceScorer
 from .. import control_mapping as cm
+from ..collection_health import CollectionHealthRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -209,32 +197,37 @@ class MSPReportExporter(ExporterBase):
         customer_name: Optional[str] = None,
         assessment_id: Optional[str] = None,
         scope_result: Optional[Any] = None,
+        health_log: Optional[List[Any]] = None,
         **_,
     ) -> bool:
         try:
-            # The software inventory lives in its own file, sitting next to
-            # the main report, so it can be regenerated/updated on its own
-            # without touching the main compliance report at all — it was
-            # moved out because it will only keep growing as more devices
-            # and software get collected. Filename is derived from the
-            # main report's own path so the two always stay associated
-            # without the caller needing to coordinate two separate paths.
+            # The software inventory and collection-health log each live in
+            # their own file, sitting next to the main report, so either
+            # can be regenerated/updated independently without touching the
+            # main compliance report. Filenames are derived from the main
+            # report's own path so all three always stay associated without
+            # the caller needing to coordinate multiple separate paths.
             base, ext = os.path.splitext(output_path)
             ext = ext or '.html'
             software_path = f"{base}_software{ext}"
+            health_path = f"{base}_health{ext}"
             main_filename = os.path.basename(output_path)
             software_filename = os.path.basename(software_path)
+            health_filename = os.path.basename(health_path)
 
             onprem_eps = self._onprem_endpoints(artifacts)
             cloud_eps = self._cloud_endpoints(artifacts)
             ad_users = self._ad_users(artifacts)
             present_evidence = self._present_evidence_keys(artifacts, onprem_eps, cloud_eps, ad_users)
             has_software = 'installed_software' in present_evidence
+            health_log = health_log or []
 
             html_content = self._generate_msp_report(
                 artifacts, customer_name, assessment_id,
                 software_href=software_filename if has_software else None,
                 scope_result=scope_result,
+                health_log=health_log,
+                health_href=health_filename,
             )
             # Explicit UTF-8 write: without it, Python falls back to the
             # platform's default encoding (often cp1252 on Windows), which
@@ -253,6 +246,20 @@ class MSPReportExporter(ExporterBase):
                 with open(software_path, 'w', encoding='utf-8') as f:
                     f.write(software_html)
                 logger.info(f"Exported software inventory: {software_path}")
+
+            # Always written, even with zero entries — a "no issues this
+            # run" page is itself a meaningful, reassuring result, not
+            # nothing to show. This is the one page in the whole report
+            # that should never be silently absent, since its entire job
+            # is answering "did anything go wrong" — omitting it when clean
+            # would make it impossible to tell "nothing broke" apart from
+            # "this feature isn't even running."
+            health_html = self._generate_collection_health_page(
+                health_log, customer_name, assessment_id, back_href=main_filename,
+            )
+            with open(health_path, 'w', encoding='utf-8') as f:
+                f.write(health_html)
+            logger.info(f"Exported collection health log: {health_path}")
 
             return True
         except Exception as e:
@@ -285,6 +292,8 @@ class MSPReportExporter(ExporterBase):
         assessment_id: Optional[str],
         software_href: Optional[str] = None,
         scope_result: Optional[Any] = None,
+        health_log: Optional[List[Any]] = None,
+        health_href: Optional[str] = None,
     ) -> str:
         compliance_score = ComplianceScorer.calculate_overall_score(artifacts)
         coverage = ComplianceScorer.calculate_coverage(artifacts)
@@ -336,6 +345,7 @@ class MSPReportExporter(ExporterBase):
         domain_coverage_html = self._build_domain_coverage_html(present_evidence)
         scoring_breakdown_html = self._build_scoring_breakdown_html(artifacts)
         asset_scope_html = self._build_asset_scope_html(scope_result)
+        health_summary_html = self._build_collection_health_summary_html(health_log or [], health_href)
 
         # Purely data-derived — no TenantProfile reaches this exporter, so
         # this reflects what was actually collected, not what was
@@ -377,7 +387,7 @@ class MSPReportExporter(ExporterBase):
                     ({coverage['assessed_weight_pct']}% of scoring weight)</td></tr>
             </table>
         </div>
-
+{health_summary_html}
         <div class="section">
             <h2>Compliance Score</h2>
             <div class="score-card">
@@ -874,6 +884,121 @@ class MSPReportExporter(ExporterBase):
         if not category:
             return ""
         return f' <span class="badge supporting">{category.upper()}</span>'
+
+    def _build_collection_health_summary_html(self, health_log: List[Any], health_href: Optional[str]) -> str:
+        """Short, ALWAYS-rendered summary near the top of the main report —
+        unlike every other optional section in this report, this one must
+        never be silently absent, because its entire job is answering "did
+        anything go wrong during collection." A missing section would be
+        ambiguous: does that mean nothing broke, or that this feature isn't
+        running at all? Always showing at least "no issues" removes that
+        ambiguity.
+
+        Deliberately a short pointer to the standalone health page, not the
+        full log inline — the same reasoning as the software inventory:
+        this can grow long, and updating it shouldn't require touching the
+        main compliance report.
+        """
+        href = health_href or "collection_health.html"
+        if not health_log:
+            return f"""
+        <div class="section">
+            <p style="font-size:0.9em;color:#475569;">
+                <span class="status-good">No collection issues this run.</span>
+                See the <a href="{href}">collection health log</a> for details on what was checked.
+            </p>
+        </div>"""
+
+        errors = sum(1 for e in health_log if e.level == 'ERROR')
+        warnings = sum(1 for e in health_log if e.level == 'WARNING')
+        parts = []
+        if errors:
+            parts.append(f"{errors} error(s)")
+        if warnings:
+            parts.append(f"{warnings} warning(s)")
+        summary = ", ".join(parts)
+        alert_class = "alert-critical" if errors else "recommendation"
+        return f"""
+        <div class="section">
+            <div class="{alert_class}">
+                <strong>Collection Health:</strong> {summary} logged during this run —
+                see the <a href="{href}">full collection health log</a> for exactly what and why.
+                A warning or error here means some evidence in this report may be incomplete;
+                it does not necessarily mean the underlying environment has a security gap.
+            </div>
+        </div>"""
+
+    def _generate_collection_health_page(self, health_log: List[Any], customer_name: Optional[str],
+                                          assessment_id: Optional[str], back_href: str) -> str:
+        """Standalone page listing every WARNING/ERROR logged during this
+        tenant's collection run — the actual fix for "these things were
+        only ever visible in the PowerShell console." Always generated,
+        even with zero entries (see _build_collection_health_summary_html
+        for why an always-present page matters here specifically)."""
+        customer_name = customer_name or "Unnamed Customer"
+        assessment_id = assessment_id or "CMMC-" + datetime.now().strftime("%Y%m%d%H%M%S")
+
+        if not health_log:
+            body = ('<p><span class="status-good">No warnings or errors were logged during this '
+                    'collection run.</span></p>')
+        else:
+            by_source: Dict[str, int] = {}
+            for e in health_log:
+                src = CollectionHealthRecorder.readable_source(e.source)
+                by_source[src] = by_source.get(src, 0) + 1
+            source_rows = "".join(
+                f"                <tr><td>{src}</td><td>{count}</td></tr>\n"
+                for src, count in sorted(by_source.items(), key=lambda kv: -kv[1])
+            )
+            entry_rows = []
+            # Errors first, then warnings, each newest-first — the thing
+            # most likely to need attention should be easiest to find.
+            for e in sorted(health_log, key=lambda e: (e.level != 'ERROR', e.timestamp), reverse=False):
+                level_color = 'status-bad' if e.level == 'ERROR' else 'status-warn'
+                src = CollectionHealthRecorder.readable_source(e.source)
+                entry_rows.append(
+                    f"                <tr><td>{e.timestamp}</td>"
+                    f"<td><span class=\"{level_color}\">{e.level}</span></td>"
+                    f"<td>{src}</td><td>{e.message}</td></tr>\n"
+                )
+            body = f"""            <p>{len(health_log)} entr{'y' if len(health_log) == 1 else 'ies'} logged during this run.</p>
+            <table>
+                <tr><th>Source</th><th>Count</th></tr>
+{source_rows}
+            </table>
+            <table>
+                <tr><th>Timestamp</th><th>Level</th><th>Source</th><th>Message</th></tr>
+{"".join(entry_rows)}
+            </table>"""
+
+        return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Collection Health — {customer_name}</title>
+    <style>{_BASE_CSS}</style>
+</head>
+<body>
+    <div class="header">
+        <h1>Collection Health Log</h1>
+        <div class="subtitle">{customer_name} — {assessment_id}</div>
+    </div>
+    <div class="content">
+        <p class="back-link"><a href="{back_href}">&larr; Back to main compliance report</a></p>
+        <div class="section" id="sec-collection-health">
+            <h2>Warnings &amp; Errors During Collection</h2>
+            <p style="font-size:0.9em;color:#475569;">
+                Every warning or error any collector logged during this run — the same
+                information previously visible only in the PowerShell console. A warning or
+                error here means some piece of evidence may be missing or incomplete; it does
+                not by itself mean the environment has a security problem.
+            </p>
+{body}
+        </div>
+        <p class="back-link"><a href="{back_href}">&larr; Back to main compliance report</a></p>
+    </div>
+</body>
+</html>"""
 
     def _build_scoring_breakdown_html(self, artifacts: Any) -> str:
         """Show the actual math behind the overall score — every category,
