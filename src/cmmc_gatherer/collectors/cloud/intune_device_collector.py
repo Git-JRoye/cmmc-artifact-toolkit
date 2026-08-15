@@ -61,12 +61,15 @@ inventory or Intune policy, and this project has already been wrong twice
 this session about a new endpoint's exact shape (detectedApps needed
 /beta; deviceCompliancePolicies rejected $select on subtype fields).
 
-PILOT FINDING (real, confirmed): the endpoint path was correct but /v1.0
-returned "Resource not found for the segment 'bitlockerRecoveryKeys'" —
-the exact same error signature detectedApps produced before that was fixed
-by switching to /beta. Now calling this under /beta too. Still unverified
-beyond this one real fix — if /beta also fails, the response body is
-already logged, so check it before guessing a third time.
+PILOT FINDING (real, confirmed, and actually verified this time): the
+correct path is informationProtection/bitlocker/recoveryKeys under /beta
+— confirmed directly from Intune's own working Recovery Keys page network
+traffic (browser dev tools), not inferred from an error message. Two
+earlier attempts both failed with "Resource not found for the segment
+'bitlockerRecoveryKeys'" — first under /v1.0, then under /beta — because
+the path was missing a "/bitlocker/" segment, not because of an API
+version or permission problem. /beta was correct from the very first
+attempt; only the path was ever wrong.
 
 Graph application permissions required:
   DeviceManagementManagedDevices.Read.All (existing — covers managedDevices
@@ -192,20 +195,23 @@ class IntuneDeviceCollector(CollectorBase):
           bitlocker_lookup_failed: True only if the Graph call itself
             errored — distinct from a confirmed "escrowed=False"
 
-        PILOT FINDING (real, confirmed): the first version of this call
-        used /v1.0 and got "Resource not found for the segment
-        'bitlockerRecoveryKeys'" against a real tenant — the exact same
-        error signature detectedApps produced under /v1.0 before that was
-        fixed by switching to /beta. Same fix applied here. Still not
-        independently verified beyond this one real error — if /beta also
-        404s, the response body is already logged, so check it before
-        guessing a third API version or a different endpoint path.
+        PILOT FINDING (real, confirmed): the URL path itself was wrong, not
+        the API version. Captured directly from Intune's own working UI via
+        browser dev tools (Network tab) against a real tenant: the correct
+        path is informationProtection/bitlocker/recoveryKeys — note the
+        extra "/bitlocker/" segment — not informationProtection/
+        bitlockerRecoveryKeys as originally written. /beta was correct from
+        the start; two earlier attempts (v1.0, then beta) both failed with
+        "Resource not found for the segment 'bitlockerRecoveryKeys'"
+        because the segment name itself was wrong, not because of version
+        or permissions. Confirmed by inspecting Intune's own Recovery Keys
+        page network traffic directly — not a guess this time.
         """
         if not azure_ad_device_id:
             return {"bitlocker_key_escrowed": None, "bitlocker_key_count": 0, "bitlocker_lookup_failed": False}
         try:
             params = {"$filter": f"deviceId eq '{azure_ad_device_id}'"}
-            keys = list(self._beta_graph.get_all("informationProtection/bitlockerRecoveryKeys", params=params))
+            keys = list(self._beta_graph.get_all("informationProtection/bitlocker/recoveryKeys", params=params))
             return {
                 "bitlocker_key_escrowed": len(keys) > 0,
                 "bitlocker_key_count": len(keys),
