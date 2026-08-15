@@ -59,15 +59,14 @@ detectedApps/compliance-policy/update-ring additions this session — the
 BitLocker recovery key API is a much less common area of Graph than device
 inventory or Intune policy, and this project has already been wrong twice
 this session about a new endpoint's exact shape (detectedApps needed
-/beta; deviceCompliancePolicies rejected $select on subtype fields). The
-endpoint path, the filter syntax (deviceId eq '{aadDeviceId}'), and the
-permission scope name below are all recalled, not independently verified
-against current Graph documentation. If this 404s, 400s, or 403s on the
-real pilot, that is genuinely useful new information — check, in this
-order: (1) is BitLockerKey.ReadBasic.All actually granted and admin-
-consented; (2) does this need /beta instead of /v1.0 (same class of issue
-as detectedApps); (3) has Microsoft renamed the filter property or
-endpoint path since this was written.
+/beta; deviceCompliancePolicies rejected $select on subtype fields).
+
+PILOT FINDING (real, confirmed): the endpoint path was correct but /v1.0
+returned "Resource not found for the segment 'bitlockerRecoveryKeys'" —
+the exact same error signature detectedApps produced before that was fixed
+by switching to /beta. Now calling this under /beta too. Still unverified
+beyond this one real fix — if /beta also fails, the response body is
+already logged, so check it before guessing a third time.
 
 Graph application permissions required:
   DeviceManagementManagedDevices.Read.All (existing — covers managedDevices
@@ -192,12 +191,21 @@ class IntuneDeviceCollector(CollectorBase):
           bitlocker_key_count: how many key records were found
           bitlocker_lookup_failed: True only if the Graph call itself
             errored — distinct from a confirmed "escrowed=False"
+
+        PILOT FINDING (real, confirmed): the first version of this call
+        used /v1.0 and got "Resource not found for the segment
+        'bitlockerRecoveryKeys'" against a real tenant — the exact same
+        error signature detectedApps produced under /v1.0 before that was
+        fixed by switching to /beta. Same fix applied here. Still not
+        independently verified beyond this one real error — if /beta also
+        404s, the response body is already logged, so check it before
+        guessing a third API version or a different endpoint path.
         """
         if not azure_ad_device_id:
             return {"bitlocker_key_escrowed": None, "bitlocker_key_count": 0, "bitlocker_lookup_failed": False}
         try:
             params = {"$filter": f"deviceId eq '{azure_ad_device_id}'"}
-            keys = list(self.graph.get_all("informationProtection/bitlockerRecoveryKeys", params=params))
+            keys = list(self._beta_graph.get_all("informationProtection/bitlockerRecoveryKeys", params=params))
             return {
                 "bitlocker_key_escrowed": len(keys) > 0,
                 "bitlocker_key_count": len(keys),
