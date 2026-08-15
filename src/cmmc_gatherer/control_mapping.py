@@ -216,6 +216,10 @@ EVIDENCE_MAP: List[EvidenceMapping] = [
         ["SI.L1-3.14.2"], Confidence.DIRECT,
     ),
     EvidenceMapping(
+        "patch_management_policy", "Windows Update Ring deferral and automatic-install configuration",
+        ["SI.L1-3.14.1"], Confidence.DIRECT,
+    ),
+    EvidenceMapping(
         "audit_log_collection", "Security event and audit log collection (on-prem Event Log + Entra sign-in/audit logs)",
         ["AU.L2-3.3.1"], Confidence.DIRECT,
     ),

@@ -5,7 +5,8 @@ distinct policy sources and maps all into the existing ``Policy`` model so
 the current scorer, MSP report, and coverage logic work unchanged:
 
   - Entra Conditional Access policies (identity/access control policy)
-  - Intune device configuration profiles (device configuration policy)
+  - Intune device configuration profiles (device configuration policy,
+    including Windows Update Ring settings mined from the same collection)
   - Intune device compliance policies (the actual configured requirements —
     minimum password length, storage encryption, active firewall, Defender)
 
@@ -51,12 +52,17 @@ is Windows-only already, and other platform types (iOS/Android/macOS
 compliance policies) are logged and skipped rather than guessed at, since
 they'd need their own, separately-verified field mappings.
 
-Also unverified: whether $select-ing Windows-specific fields on this
-polymorphic collection causes an error for non-Windows policy types mixed
-into the same response. If the real pilot run errors on this specifically,
-the likely fix is dropping $select and filtering client-side instead —
-the same kind of fix the detectedApps beta-endpoint issue needed, not a
-sign the underlying approach is wrong.
+PILOT FINDING (real, confirmed): a first version of this call used
+$select with Windows-subtype-specific field names directly on the
+deviceCompliancePolicies collection and got a 400 Bad Request against a
+real tenant. Best-confidence diagnosis: this collection is a
+base/polymorphic type with several subtypes (windows10, android, ios,
+macOS...), and Graph commonly rejects $select-ing a subtype-only property
+on the base collection endpoint without a type-cast in the URL. Fix
+applied: $select was dropped entirely for this one call — full objects
+are fetched and read directly, since the per-field mapping already
+tolerates any field being absent. Still unverified against a live tenant
+as of this writing — if it fails again, the response body is now logged.
 
 Graph application permissions required for this file's full functionality:
   Policy.Read.All (for Conditional Access policies)
@@ -130,13 +136,27 @@ class CloudPolicyCollector(CollectorBase):
     # -- Intune configuration profiles ---------------------------------------
 
     def _collect_intune_config_profiles(self) -> List[Policy]:
+        """Also mines Windows Update Ring settings out of this SAME
+        collection — deviceManagement/deviceConfigurations is polymorphic
+        (many profile subtypes), and windowsUpdateForBusinessConfiguration
+        is one of them. Deliberately fetches full objects with NO $select
+        at all, rather than repeating the exact mistake the compliance
+        policy collector just hit for real: $select-ing a subtype-specific
+        field name on this kind of collection risks a 400 Bad Request.
+        Base fields (id, displayName, lastModifiedDateTime) exist on every
+        subtype and are always safe to read via .get() regardless.
+        """
         out: List[Policy] = []
-        params = {"$select": "id,displayName,lastModifiedDateTime"}
-        profiles = list(self.graph.get_all("deviceManagement/deviceConfigurations", params=params))
+        profiles = list(self.graph.get_all("deviceManagement/deviceConfigurations"))
         logger.info("  Intune configuration profiles found: %d", len(profiles))
         for profile in profiles:
             profile_id = profile.get("id")
             name = profile.get("displayName") or profile_id or "Unnamed Configuration Profile"
+            odata_type = profile.get("@odata.type", "")
+
+            if odata_type == "#microsoft.graph.windowsUpdateForBusinessConfiguration":
+                out.extend(self._map_update_ring_policy(profile, name, profile.get("lastModifiedDateTime")))
+
             if not profile_id:
                 continue
             try:
@@ -177,25 +197,116 @@ class CloudPolicyCollector(CollectorBase):
     def _fetch_status_overview(self, profile_id: str) -> dict:
         return self.graph.get_one(f"deviceManagement/deviceConfigurations/{profile_id}/deviceStatusOverview")
 
+    @staticmethod
+    def _map_update_ring_policy(p: dict, policy_name: str, last_modified: Optional[str]) -> List[Policy]:
+        """Map one windowsUpdateForBusinessConfiguration object into
+        individual Policy rows for the settings that actually matter for
+        patch management evidence: how long quality (security) updates are
+        deferred, and whether updates install automatically at all rather
+        than depending on a user to act.
+
+        HONEST CONFIDENCE NOTE, two layers: (1) field names
+        (qualityUpdatesDeferralPeriodInDays, featureUpdatesDeferralPeriodInDays,
+        automaticUpdateMode) are recalled with moderate, not independently
+        verified, confidence — same caveat as the compliance-policy fields.
+        (2) The <=7-day pass/fail threshold on quality-update deferral is a
+        reasonable, defensible security judgment (quality updates commonly
+        carry security patches, so a long deferral extends real exposure
+        time) — it is NOT a literal number CMMC/SI.L1-3.14.1 mandates in
+        its text, which only says flaws must be corrected "in a timely
+        manner" without specifying days. Treated the same way the existing
+        password-length/lockout thresholds already are: a stated, defensible
+        judgment call, not a direct quote from the standard.
+
+        Feature-update deferral is shown informationally only (no pass/fail)
+        — that setting is primarily about compatibility/stability rollout
+        pacing, not security exposure, so judging it pass/fail would overstate
+        what this evidence actually proves.
+        """
+        rows: List[Policy] = []
+        target = f"Update Ring: {policy_name}"
+
+        quality_deferral = p.get("qualityUpdatesDeferralPeriodInDays")
+        if quality_deferral is not None:
+            meets_bar = quality_deferral <= 7
+            rows.append(Policy(
+                policy_name="QualityUpdateDeferralDays", policy_type="Intune Update Ring",
+                status="Enabled" if meets_bar else "Disabled", target=target,
+                value=str(quality_deferral),
+                description=(f"Quality (security) update deferral period from '{policy_name}' — "
+                              f"{quality_deferral} day(s). Longer deferrals delay real security "
+                              f"patch exposure (SI.L1-3.14.1); 7 days or fewer is treated as a "
+                              f"reasonable bar here, not a literal CMMC-mandated number."),
+                last_applied=last_modified,
+            ))
+
+        feature_deferral = p.get("featureUpdatesDeferralPeriodInDays")
+        if feature_deferral is not None:
+            rows.append(Policy(
+                policy_name="FeatureUpdateDeferralDays", policy_type="Intune Update Ring",
+                status="Configured", target=target, value=str(feature_deferral),
+                description=(f"Feature update deferral period from '{policy_name}' — "
+                              f"{feature_deferral} day(s) (informational: primarily a "
+                              f"stability/compatibility setting, not evaluated pass/fail here)."),
+                last_applied=last_modified,
+            ))
+
+        auto_mode = p.get("automaticUpdateMode")
+        if auto_mode is not None:
+            # Known values, moderate confidence: notConfigured, notifyDownload,
+            # autoInstallAtMaintenanceTime, autoInstallAndRebootAtMaintenanceTime,
+            # autoInstallAndRebootAtScheduledTime, autoInstallAndRebootWithoutEndUserControl,
+            # windowsDefault. Treated as meeting the bar only for the states
+            # that genuinely apply updates automatically without depending
+            # on a user to notice/act.
+            auto_installs = str(auto_mode).lower().startswith("autoinstall")
+            rows.append(Policy(
+                policy_name="AutomaticUpdateMode", policy_type="Intune Update Ring",
+                status="Enabled" if auto_installs else "Disabled", target=target,
+                value=str(auto_mode),
+                description=f"Automatic update installation mode ('{auto_mode}') from '{policy_name}'",
+                last_applied=last_modified,
+            ))
+
+        return rows
+
     # -- Intune compliance policies ------------------------------------------
 
     def _collect_compliance_policies(self) -> List[Policy]:
+        """PILOT FINDING (real, confirmed): the first version of this call
+        used $select with Windows-subtype-specific fields
+        (passwordMinimumLength, storageRequireEncryption, etc.) directly on
+        this polymorphic collection and got a 400 Bad Request against a
+        real tenant. Best-confidence diagnosis: deviceCompliancePolicies is
+        a base/polymorphic type with several subtypes (windows10, android,
+        ios, macOS...); Graph commonly rejects $select-ing a subtype-only
+        property on the base collection endpoint without a type-cast in
+        the URL. Fix applied here: no $select at all — fetch full objects
+        and read fields directly (the per-field `.get()` calls below
+        already tolerate any field being absent). This is still a
+        hypothesis, not confirmed working — if it fails again, the
+        response body is now logged so the real error text is available
+        instead of guessing a third time.
+        """
         out: List[Policy] = []
-        params = {
-            "$select": "id,displayName,lastModifiedDateTime,passwordMinimumLength,"
-                       "passwordRequiredType,storageRequireEncryption,activeFirewallRequired,"
-                       "defenderEnabled,rtpEnabled,osMinimumVersion",
-        }
-        for p in self.graph.get_all("deviceManagement/deviceCompliancePolicies", params=params):
-            odata_type = p.get("@odata.type", "")
-            name = p.get("displayName") or p.get("id") or "Unnamed Compliance Policy"
-            if odata_type != "#microsoft.graph.windows10CompliancePolicy":
-                logger.info(
-                    "  Skipping non-Windows compliance policy '%s' (%s) — only "
-                    "windows10CompliancePolicy is parsed today", name, odata_type,
-                )
-                continue
-            out.extend(self._map_windows_compliance_policy(p, name, p.get("lastModifiedDateTime")))
+        try:
+            for p in self.graph.get_all("deviceManagement/deviceCompliancePolicies"):
+                odata_type = p.get("@odata.type", "")
+                name = p.get("displayName") or p.get("id") or "Unnamed Compliance Policy"
+                if odata_type != "#microsoft.graph.windows10CompliancePolicy":
+                    logger.info(
+                        "  Skipping non-Windows compliance policy '%s' (%s) — only "
+                        "windows10CompliancePolicy is parsed today", name, odata_type,
+                    )
+                    continue
+                out.extend(self._map_windows_compliance_policy(p, name, p.get("lastModifiedDateTime")))
+        except Exception as e:
+            detail = getattr(getattr(e, "response", None), "text", None)
+            if detail:
+                logger.error("Intune compliance policy collection failed: %s | Response: %s", e, detail[:500])
+            else:
+                logger.error("Intune compliance policy collection failed: %s", e)
+            return out
         logger.info("  Intune compliance policies parsed: %d record(s)", len(out))
         return out
 

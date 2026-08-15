@@ -589,7 +589,7 @@ class MSPReportExporter(ExporterBase):
         if artifacts.policies:
             html += f"""        <div class="section" id="sec-policy-compliance">
             <h2>Policy Compliance</h2>
-            {self._satisfies_badge_html(['config_enforcement', 'time_sync', 'password_complexity_enforcement', 'password_reuse_enforcement', 'account_lockout_enforcement', 'storage_encryption_requirement', 'firewall_policy_requirement', 'malware_protection_requirement'], present_evidence)}
+            {self._satisfies_badge_html(['config_enforcement', 'time_sync', 'password_complexity_enforcement', 'password_reuse_enforcement', 'account_lockout_enforcement', 'storage_encryption_requirement', 'firewall_policy_requirement', 'malware_protection_requirement', 'patch_management_policy'], present_evidence)}
             <table>
                 <tr><th>Policy</th><th>Type</th><th>Status</th><th>Current Value</th></tr>
 """
@@ -677,6 +677,7 @@ class MSPReportExporter(ExporterBase):
         'storage_encryption_requirement': 'sec-policy-compliance',
         'firewall_policy_requirement': 'sec-policy-compliance',
         'malware_protection_requirement': 'sec-policy-compliance',
+        'patch_management_policy': 'sec-policy-compliance',
         'time_sync': 'sec-policy-compliance',
         'audit_log_collection': 'sec-security-events',
         'audit_user_traceability': 'sec-security-events',
@@ -737,6 +738,8 @@ class MSPReportExporter(ExporterBase):
             present.append('firewall_policy_requirement')
         if any(p.policy_name in ('DefenderEnabled', 'RealTimeProtectionRequired') for p in artifacts.policies):
             present.append('malware_protection_requirement')
+        if any(p.policy_type == 'Intune Update Ring' for p in artifacts.policies):
+            present.append('patch_management_policy')
 
         if artifacts.security_events:
             present.append('audit_log_collection')
@@ -1564,6 +1567,14 @@ class MSPReportExporter(ExporterBase):
                 'requirement if it should be enforced. A compliance policy that does not '
                 'require a setting means Intune will never flag a device non-compliant '
                 'for lacking it, regardless of the device\'s actual configuration.',
+            ),
+            'Intune Update Ring': (
+                'Windows Update Ring Deferral or Auto-Install Setting Below Baseline', 'Medium',
+                'Review the Windows Update Ring profile in the Intune admin center. Quality '
+                '(security) update deferral longer than about a week meaningfully extends '
+                'real vulnerability exposure — consider shortening it. If automatic '
+                'installation isn\'t enabled, updates depend on a user noticing and acting, '
+                'which is a weaker control for timely flaw remediation (SI.L1-3.14.1).',
             ),
             'Time Synchronization': (
                 'Time Synchronization Not Configured', 'Medium',
