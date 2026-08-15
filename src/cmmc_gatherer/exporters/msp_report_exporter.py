@@ -448,10 +448,11 @@ class MSPReportExporter(ExporterBase):
         if cloud_eps:
             html += f"""        <div class="section" id="sec-cloud-devices">
             <h2>Cloud-Managed Devices (Intune)</h2>
+            {self._satisfies_badge_html(['bitlocker_key_escrow'], present_evidence)}
             <table>
                 <tr>
                     <th>Hostname</th><th>OS Version</th><th>Compliance State</th>
-                    <th>Encrypted</th><th>Management State</th><th>Owner</th>
+                    <th>Encrypted</th><th>Recovery Key Escrowed</th><th>Management State</th><th>Owner</th>
                     <th>Installed Software</th>
                 </tr>
 """
@@ -461,10 +462,20 @@ class MSPReportExporter(ExporterBase):
                 comp_color = 'status-good' if compliant else 'status-bad'
                 enc = meta.get('is_encrypted')
                 enc_color = 'status-good' if enc else 'status-warn'
+                escrowed = meta.get('bitlocker_key_escrowed')
+                if escrowed is True:
+                    escrow_cell = f'<span class="status-good">Yes ({meta.get("bitlocker_key_count", 1)})</span>'
+                elif escrowed is False:
+                    escrow_cell = '<span class="status-bad">No</span>'
+                elif meta.get('bitlocker_lookup_failed'):
+                    escrow_cell = '<span class="status-warn">Lookup failed</span>'
+                else:
+                    escrow_cell = '<span class="na">Not checked</span>'
                 html += (
                     f"                <tr><td>{ep.hostname}{self._asset_category_note(ep)}</td><td>{ep.os_version}</td>"
                     f"<td><span class=\"{comp_color}\">{meta.get('compliance_state', 'Unknown')}</span></td>"
                     f"<td><span class=\"{enc_color}\">{enc}</span></td>"
+                    f"<td>{escrow_cell}</td>"
                     f"<td>{meta.get('management_state', 'Unknown')}</td>"
                     f"<td>{meta.get('owner_upn', 'Unknown')}</td>"
                     f"<td>{self._software_cell(ep, software_href)}</td></tr>\n"
@@ -678,6 +689,7 @@ class MSPReportExporter(ExporterBase):
         'firewall_policy_requirement': 'sec-policy-compliance',
         'malware_protection_requirement': 'sec-policy-compliance',
         'patch_management_policy': 'sec-policy-compliance',
+        'bitlocker_key_escrow': 'sec-cloud-devices',
         'time_sync': 'sec-policy-compliance',
         'audit_log_collection': 'sec-security-events',
         'audit_user_traceability': 'sec-security-events',
@@ -740,6 +752,8 @@ class MSPReportExporter(ExporterBase):
             present.append('malware_protection_requirement')
         if any(p.policy_type == 'Intune Update Ring' for p in artifacts.policies):
             present.append('patch_management_policy')
+        if any((ep.metadata or {}).get('bitlocker_key_escrowed') is not None for ep in artifacts.endpoints):
+            present.append('bitlocker_key_escrow')
 
         if artifacts.security_events:
             present.append('audit_log_collection')
@@ -1518,6 +1532,31 @@ class MSPReportExporter(ExporterBase):
                                    'Intune disk encryption policy. Data at rest on unencrypted '
                                    'devices is a direct risk to CUI protection requirements, '
                                    'regardless of the device\'s overall Intune compliance state.',
+            })
+
+        # A device can report itself encrypted with genuinely no recoverable
+        # key anywhere — if the drive fails, the PIN is forgotten, or the
+        # TPM needs to be cleared, the data becomes permanently
+        # inaccessible. Both encryption AND escrow must be affirmatively
+        # confirmed here (never triggered on an unknown/failed lookup) —
+        # this is checking for a real, known gap, not guessing at one.
+        encrypted_no_escrow = [
+            ep.hostname for ep in intune_eps
+            if self._intune_signal(ep).get('is_encrypted') is True
+            and self._intune_signal(ep).get('bitlocker_key_escrowed') is False
+        ]
+        if encrypted_no_escrow:
+            findings.append({
+                'title': 'Device Encrypted But No Recovery Key Escrowed',
+                'severity': 'High',
+                'description': f'The following managed devices report encryption enabled but have '
+                                f'no BitLocker recovery key escrowed: {", ".join(encrypted_no_escrow)}',
+                'recommendation': 'Confirm BitLocker is actually configured to back up its recovery '
+                                   'key to Entra ID/Intune (not just enabled locally). Without an '
+                                   'escrowed key, a forgotten PIN, TPM reset, or hardware fault makes '
+                                   'the encrypted data permanently unrecoverable — this directly '
+                                   'implicates SC.L2-3.13.10 (cryptographic key management includes '
+                                   'the ability to recover keys, not just create them).',
             })
 
         # Policy findings reuse the same pass/fail rules as the scorer, so an

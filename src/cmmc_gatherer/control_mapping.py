@@ -172,6 +172,11 @@ PRACTICES: Dict[str, Practice] = {
         "SC.L2-3.13.16", "SC", 2, "Data at Rest",
         "Protect the confidentiality of CUI at rest.",
     ),
+    "SC.L2-3.13.10": Practice(
+        "SC.L2-3.13.10", "SC", 2, "Key Management",
+        "Establish and manage cryptographic keys for cryptography employed "
+        "in organizational systems.",
+    ),
 }
 
 EVIDENCE_MAP: List[EvidenceMapping] = [
@@ -218,6 +223,10 @@ EVIDENCE_MAP: List[EvidenceMapping] = [
     EvidenceMapping(
         "patch_management_policy", "Windows Update Ring deferral and automatic-install configuration",
         ["SI.L1-3.14.1"], Confidence.DIRECT,
+    ),
+    EvidenceMapping(
+        "bitlocker_key_escrow", "BitLocker recovery key escrow status (existence check only, never the key itself)",
+        ["SC.L2-3.13.10"], Confidence.SUPPORTING,
     ),
     EvidenceMapping(
         "audit_log_collection", "Security event and audit log collection (on-prem Event Log + Entra sign-in/audit logs)",
