@@ -165,6 +165,7 @@ def main():
             customer_name=result.display_name,
             assessment_id=f"PILOT-{result.tenant_key.upper()}",
             scope_result=result.scope_result,
+            health_log=result.health_log,
         )
         print(f"\nReport written: {out_path}")
 

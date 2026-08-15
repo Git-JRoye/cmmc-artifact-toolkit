@@ -35,6 +35,7 @@ from .collectors.onprem.event_log_collector import EventLogCollector
 from .collectors.onprem.policy_collector import PolicyCollector
 from .models.artifacts import ArtifactCollection
 from .asset_scope import ScopeApplicationResult, apply_asset_scope
+from .collection_health import CollectionHealthRecorder, HealthLogEntry
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ class TenantRunResult:
     collection: ArtifactCollection
     errors: List[str] = field(default_factory=list)
     scope_result: Optional[ScopeApplicationResult] = None  # None if no asset_scope was configured
+    health_log: List[HealthLogEntry] = field(default_factory=list)  # every WARNING/ERROR logged during this run
 
 
 class TenantOrchestrator:
@@ -82,28 +84,40 @@ class TenantOrchestrator:
         onprem_endpoints, cloud_endpoints = [], []
         ad_objects, events, policies = [], [], []
 
-        if profile.runs_onprem():
-            try:
-                ep, ad, ev, po = self._run_onprem(profile)
-                onprem_endpoints += ep
-                ad_objects += ad
-                events += ev
-                policies += po
-            except Exception as e:
-                logger.error("[%s] on-prem plane failed: %s", profile.tenant_key, e)
-                errors.append(f"onprem: {e}")
+        # Captures every WARNING/ERROR any collector logs during this run,
+        # so a real failure (a bad Graph call, a permission gap) is visible
+        # in the report itself, not only in this console — see
+        # collection_health.py. try/finally so the handler is always
+        # removed even if something below raises unexpectedly; leaving it
+        # attached would leak into every subsequent tenant's run.
+        health_recorder = CollectionHealthRecorder()
+        cmmc_logger = logging.getLogger("cmmc_gatherer")
+        cmmc_logger.addHandler(health_recorder)
+        try:
+            if profile.runs_onprem():
+                try:
+                    ep, ad, ev, po = self._run_onprem(profile)
+                    onprem_endpoints += ep
+                    ad_objects += ad
+                    events += ev
+                    policies += po
+                except Exception as e:
+                    logger.error("[%s] on-prem plane failed: %s", profile.tenant_key, e)
+                    errors.append(f"onprem: {e}")
 
-        if profile.runs_cloud():
-            try:
-                ep, ad, ev, po, cloud_errors = self._run_cloud(profile)
-                cloud_endpoints += ep  # Intune devices, mapped to Endpoint
-                ad_objects += ad       # Entra users/groups, mapped to ADObject
-                events += ev           # Entra sign-in + directory audit logs, mapped to SecurityEvent
-                policies += po         # Conditional Access + Intune config profiles, mapped to Policy
-                errors += cloud_errors
-            except Exception as e:
-                logger.error("[%s] cloud plane failed: %s", profile.tenant_key, e)
-                errors.append(f"cloud: {e}")
+            if profile.runs_cloud():
+                try:
+                    ep, ad, ev, po, cloud_errors = self._run_cloud(profile)
+                    cloud_endpoints += ep  # Intune devices, mapped to Endpoint
+                    ad_objects += ad       # Entra users/groups, mapped to ADObject
+                    events += ev           # Entra sign-in + directory audit logs, mapped to SecurityEvent
+                    policies += po         # Conditional Access + Intune config profiles, mapped to Policy
+                    errors += cloud_errors
+                except Exception as e:
+                    logger.error("[%s] cloud plane failed: %s", profile.tenant_key, e)
+                    errors.append(f"cloud: {e}")
+        finally:
+            cmmc_logger.removeHandler(health_recorder)
 
         endpoints = self._merge_endpoints(onprem_endpoints, cloud_endpoints)
         merged_count = len(onprem_endpoints) + len(cloud_endpoints) - len(endpoints)
@@ -145,6 +159,7 @@ class TenantOrchestrator:
             collection=collection,
             errors=errors,
             scope_result=scope_result,
+            health_log=health_recorder.entries,
         )
 
     # -- device de-duplication -----------------------------------------------
