@@ -16,16 +16,18 @@ Status — read this before relying on anything here
 This project is under active restructuring. Be precise about what's real:
 
 Component	Status
-On-prem endpoint collector (OS, patches, Defender, firewall)	✅ Real — PowerShell-backed, live data
-Entra ID identity collector (users, groups, guests, stale accounts)	✅ Real — Microsoft Graph
-Intune device collector (compliance, encryption, management state)	✅ Real — Microsoft Graph
+On-prem endpoint collector (OS, patches, Defender, firewall, installed software)	✅ Real — PowerShell-backed, live data
+Entra ID identity collector (users, groups, guests, stale accounts, MFA, privileged roles, group membership)	✅ Real — Microsoft Graph
+Intune device collector (compliance, encryption, management state, installed software)	✅ Real — Microsoft Graph
 Per-tenant orchestrator (runs the right plane per client)	✅ Real
 National-cloud support (commercial / GCC / GCC High / DoD)	✅ Real for app-registration auth; GDAP and interactive auth are unimplemented seams
-On-prem AD, event log, and policy collectors	✅ Real — LDAP (AD) and PowerShell-backed (event log, policy)
-Compliance scoring	⚠️ Placeholder heuristics — not yet mapped to real 800-171 practices or SPRS methodology
+On-prem AD, event log, and policy collectors (incl. time synchronization)	✅ Real — LDAP (AD) and PowerShell-backed (event log, policy)
+Compliance scoring	✅ Real — six-dimension weighted scorer, with the full weight/score/coverage breakdown shown in the report, not just a final number
+CMMC/NIST 800-171 practice mapping	✅ Real — evidence is mapped to specific practice IDs (e.g. IA.L2-3.5.3, AU.L2-3.3.7), tagged DIRECT or SUPPORTING confidence, shown in a domain-grouped navigation section
+CMMC asset scope (CUI Asset / SPA / CRMA / Specialized / Out-of-Scope)	✅ Real — per-tenant config, defaults to "everything in scope," excludes/documents assets per the CMMC Assessment Guide's categorization
 SSP / POA&M generation	❌ Not started
 
-Do not use this to make a real compliance claim yet. The collection layer is being built out module by module; scoring in particular needs a full rework before its output means anything to an assessor. See CMMC-TOOL-BUILD-PLAN.md for the phased roadmap.
+Do not use this to make a real compliance claim without a qualified reviewer. See docs/GETTING_STARTED.md for installation, and CMMC-TOOL-BUILD-PLAN.md for the phased roadmap.
 
 Architecture
 
@@ -56,44 +58,24 @@ Why two planes, one model set: an on-prem endpoint and an Intune-managed device 
 Multi-cloud by design: cloud/cloud_config.py holds a small registry mapping each national cloud (commercial, GCC, GCC High, DoD) to its correct Microsoft Graph endpoint and login authority. A TenantProfile declares which cloud a client is in; the Graph client and auth provider read that and target the right endpoint automatically — commercial and GCC High are both just configuration, not separate code paths.
 
 Getting started
-bash
+
+See `docs/GETTING_STARTED.md` for full installation instructions (Python
+setup, downloading the repo, installing dependencies) if this is your
+first time here.
+
+Once installed, configuration and running a real assessment is documented in:
+- `docs/USER_GUIDE_SINGLE_ORG.md` — assessing one organization
+- `docs/USER_GUIDE_MSP.md` — assessing multiple client tenants
+
+Quick reference once set up:
+```bash
 pip install -r requirements.txt
+cp tenants.example.yaml tenants.yaml   # fill in your real environment's details
+python run_assessment.py --config tenants.yaml --list   # validate config, no real collection yet
+python run_assessment.py --all                          # run every configured tenant
+```
 
-Requires Python 3.8+. On-prem collection requires PowerShell 5.1+ on the target Windows host. Cloud collection requires an Entra app registration in the tenant's own national cloud (a commercial app registration cannot authenticate a GCC High tenant) with admin-consented Graph permissions: User.Read.All, Group.Read.All, AuditLog.Read.All, DeviceManagementManagedDevices.Read.All.
-
-Run the on-prem endpoint collector locally:
-
-python
-from cmmc_gatherer.collectors.onprem.endpoint_collector import EndpointCollector
-
-# demo=True returns canned data with no Windows host required — useful for
-# exercising the pipeline before pointing it at a real machine.
-endpoints = EndpointCollector(demo=True).collect()
-
-Run a full per-tenant collection (on-prem + cloud, mixed):
-
-python
-from cmmc_gatherer.cloud.cloud_config import TenantProfile, NationalCloud, Plane, AuthMethod
-from cmmc_gatherer.orchestrator import TenantOrchestrator
-
-def get_secret(secret_ref: str) -> str:
-    # Look this up in your own vault/secret store — never hardcode it here.
-    ...
-
-profile = TenantProfile(
-    tenant_key="acme",
-    display_name="Acme Corp",
-    national_cloud=NationalCloud.GCC_HIGH,
-    planes=[Plane.CLOUD],
-    auth_method=AuthMethod.APP_REGISTRATION,
-    tenant_id="<entra-tenant-guid>",
-    client_id="<app-registration-client-id>",
-    secret_ref="acme-graph-client-secret",
-)
-
-orchestrator = TenantOrchestrator(secret_resolver=get_secret)
-result = orchestrator.run_one(profile)
-print(result.collection, result.errors)
+Requires Python 3.10+. On-prem collection requires PowerShell 5.1+ on the target Windows host. Cloud collection requires an Entra app registration in the tenant's own national cloud (a commercial app registration cannot authenticate a GCC High tenant) with admin-consented Graph permissions — the full current list is in `docs/USER_GUIDE_SINGLE_ORG.md` §3.3.
 Regulatory accuracy — a standing caution
 
 CMMC levels, the 800-171 revision in force, and SPRS scoring weights change over time and are not hardcoded in this codebase for that reason — treat any control list or weight as external, versioned configuration once the scoring rework lands, and verify current requirements against official DoD/CMMC sources before relying on a score for an actual assessment.
