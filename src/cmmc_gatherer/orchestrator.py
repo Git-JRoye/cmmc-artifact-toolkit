@@ -34,6 +34,7 @@ from .collectors.onprem.endpoint_collector import EndpointCollector
 from .collectors.onprem.event_log_collector import EventLogCollector
 from .collectors.onprem.policy_collector import PolicyCollector
 from .models.artifacts import ArtifactCollection
+from .asset_scope import ScopeApplicationResult, apply_asset_scope
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class TenantRunResult:
     display_name: str
     collection: ArtifactCollection
     errors: List[str] = field(default_factory=list)
+    scope_result: Optional[ScopeApplicationResult] = None  # None if no asset_scope was configured
 
 
 class TenantOrchestrator:
@@ -124,11 +126,25 @@ class TenantOrchestrator:
             profile.tenant_key, len(endpoints), len(ad_objects), len(events),
             len(policies), len(errors),
         )
+
+        # Apply CMMC asset-scope categorization AFTER full collection, not
+        # during it — collection always sees the whole reachable
+        # environment first; scope filtering is a distinct, separate step
+        # on top of that, so the two concerns never get tangled together.
+        # None means no asset_scope was configured for this tenant at all
+        # (e.g. a GCC High client whose entire environment is genuinely in
+        # scope) — nothing to apply, no CMMC Assessment Scope section will
+        # render for it.
+        scope_result = None
+        if profile.asset_scope is not None:
+            scope_result = apply_asset_scope(collection, profile.asset_scope)
+
         return TenantRunResult(
             tenant_key=profile.tenant_key,
             display_name=profile.display_name,
             collection=collection,
             errors=errors,
+            scope_result=scope_result,
         )
 
     # -- device de-duplication -----------------------------------------------

@@ -20,6 +20,7 @@ from enum import Enum
 from typing import Dict, List, Optional
 
 from ..onprem.domain_config import DomainConfig
+from ..asset_scope import AssetScope
 
 
 class NationalCloud(str, Enum):
@@ -79,6 +80,7 @@ class TenantProfile:
     secret_ref: Optional[str] = None      # key into your vault/secret store
 
     domain_config: Optional[DomainConfig] = None  # on-prem AD connection details, if runs_onprem()
+    asset_scope: Optional[AssetScope] = None      # CMMC asset categorization for this tenant; None = everything is CUI_ASSET (fully assessed)
 
     def endpoints(self) -> CloudEndpoints:
         return NATIONAL_CLOUDS[self.national_cloud]

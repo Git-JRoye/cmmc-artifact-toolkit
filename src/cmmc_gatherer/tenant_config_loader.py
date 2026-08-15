@@ -27,10 +27,11 @@ unimplemented seam it always was.
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .cloud.cloud_config import AuthMethod, NationalCloud, Plane, TenantProfile
 from .onprem.domain_config import DomainConfig
+from .asset_scope import AssetCategory, AssetException, AssetScope, load_exceptions_csv
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +184,8 @@ def _build_profile(entry: Dict[str, Any], index: int, config_path: str) -> Tenan
             stale_after_days=onprem_cfg.get("stale_after_days", 90),
         )
 
+    asset_scope = _build_asset_scope(entry.get("asset_scope"), tenant_key, config_path)
+
     return TenantProfile(
         tenant_key=tenant_key,
         display_name=display_name,
@@ -193,7 +196,89 @@ def _build_profile(entry: Dict[str, Any], index: int, config_path: str) -> Tenan
         client_id=client_id,
         secret_ref=secret_ref,
         domain_config=domain_config,
+        asset_scope=asset_scope,
     )
+
+
+def _build_asset_scope(scope_cfg: Any, tenant_key: str, config_path: str) -> Optional[AssetScope]:
+    """Parse an optional 'asset_scope:' block. Entirely optional — a tenant
+    with nothing to exclude (e.g. a GCC High client whose whole environment
+    is in scope) simply omits this block, and everything defaults to
+    CUI_ASSET (fully assessed).
+
+    Supports exceptions inline in YAML, from a CSV file (built/edited in
+    Excel — the format most MSP admins already work in), or both at once
+    (combined, not one overriding the other).
+    """
+    if scope_cfg is None:
+        return None
+    if not isinstance(scope_cfg, dict):
+        raise TenantConfigError(
+            f"{config_path}: tenant '{tenant_key}' has 'asset_scope:' but it isn't a "
+            f"mapping (key: value pairs)"
+        )
+
+    default_raw = scope_cfg.get("default", "cui_asset")
+    try:
+        default_category = AssetCategory(default_raw)
+    except ValueError:
+        raise TenantConfigError(
+            f"{config_path}: tenant '{tenant_key}' has invalid asset_scope default "
+            f"'{default_raw}' — valid values: {[c.value for c in AssetCategory]}"
+        )
+
+    exceptions: List[AssetException] = []
+
+    inline = scope_cfg.get("exceptions") or []
+    if not isinstance(inline, list):
+        raise TenantConfigError(
+            f"{config_path}: tenant '{tenant_key}' asset_scope.exceptions must be a list"
+        )
+    for i, exc_entry in enumerate(inline, start=1):
+        if not isinstance(exc_entry, dict):
+            raise TenantConfigError(
+                f"{config_path}: tenant '{tenant_key}' asset_scope.exceptions entry #{i} "
+                f"must be a mapping (key: value pairs)"
+            )
+        id_type = exc_entry.get("identifier_type")
+        identifier = exc_entry.get("identifier")
+        category_raw = exc_entry.get("category")
+        reason = exc_entry.get("reason")
+        if id_type not in ("hostname", "user"):
+            raise TenantConfigError(
+                f"{config_path}: tenant '{tenant_key}' asset_scope.exceptions entry #{i} "
+                f"has invalid identifier_type '{id_type}' — must be 'hostname' or 'user'"
+            )
+        if not identifier:
+            raise TenantConfigError(
+                f"{config_path}: tenant '{tenant_key}' asset_scope.exceptions entry #{i} "
+                f"is missing 'identifier'"
+            )
+        try:
+            category = AssetCategory(category_raw)
+        except (ValueError, TypeError):
+            raise TenantConfigError(
+                f"{config_path}: tenant '{tenant_key}' asset_scope.exceptions entry #{i} "
+                f"has invalid category '{category_raw}' — valid values: "
+                f"{[c.value for c in AssetCategory]}"
+            )
+        if not reason:
+            raise TenantConfigError(
+                f"{config_path}: tenant '{tenant_key}' asset_scope.exceptions entry #{i} "
+                f"is missing 'reason' — every exception needs a stated justification"
+            )
+        exceptions.append(AssetException(id_type, identifier, category, reason))
+
+    csv_path = scope_cfg.get("exceptions_file")
+    if csv_path:
+        try:
+            exceptions.extend(load_exceptions_csv(csv_path))
+        except ValueError as e:
+            raise TenantConfigError(
+                f"{config_path}: tenant '{tenant_key}' asset_scope.exceptions_file error: {e}"
+            )
+
+    return AssetScope(default=default_category, exceptions=exceptions)
 
 
 def _require_nested(block: Dict[str, Any], field_name: str, tenant_key: str,

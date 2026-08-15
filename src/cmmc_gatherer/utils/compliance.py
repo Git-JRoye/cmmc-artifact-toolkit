@@ -121,12 +121,27 @@ class ComplianceScorer:
 
     # -- endpoint dimensions (on-prem only — see module docstring) -----------
 
+    # CRMA/Specialized-tagged assets (via asset_scope.apply_asset_scope) are
+    # kept visible in report tables but must never contribute to scoring —
+    # the CMMC Assessment Guide is explicit that these categories are
+    # reviewed for SSP accuracy only, not assessed against the practices.
+    _EXCLUDED_FROM_SCORING_CATEGORIES = ('crma', 'specialized')
+
+    @classmethod
+    def _is_scoreable_endpoint(cls, ep) -> bool:
+        return (ep.metadata or {}).get('asset_category') not in cls._EXCLUDED_FROM_SCORING_CATEGORIES
+
+    @classmethod
+    def _is_scoreable_ad_object(cls, obj) -> bool:
+        return (obj.attributes or {}).get('asset_category') not in cls._EXCLUDED_FROM_SCORING_CATEGORIES
+
     @classmethod
     def _onprem_endpoints(cls, artifacts: ArtifactCollection):
         # firewall_status is only ever set by the on-prem collector; cloud
         # (Intune) endpoints leave it None deliberately. Use it as the signal
         # for "this endpoint has on-prem-style data to score."
-        return [ep for ep in artifacts.endpoints if ep.firewall_status is not None]
+        return [ep for ep in artifacts.endpoints
+                if ep.firewall_status is not None and cls._is_scoreable_endpoint(ep)]
 
     @classmethod
     def _score_firewall(cls, artifacts: ArtifactCollection) -> Optional[int]:
@@ -139,7 +154,8 @@ class ComplianceScorer:
 
     @classmethod
     def _score_antivirus(cls, artifacts: ArtifactCollection) -> Optional[int]:
-        applicable = [ep for ep in artifacts.endpoints if ep.antivirus_status is not None]
+        applicable = [ep for ep in artifacts.endpoints
+                      if ep.antivirus_status is not None and cls._is_scoreable_endpoint(ep)]
         if not applicable:
             return None
         active = sum(1 for ep in applicable if ep.antivirus_status == "Active")
@@ -220,7 +236,8 @@ class ComplianceScorer:
 
     @classmethod
     def _score_ad_security(cls, artifacts: ArtifactCollection) -> Optional[int]:
-        users = [o for o in artifacts.ad_objects if o.object_class == 'user']
+        users = [o for o in artifacts.ad_objects
+                 if o.object_class == 'user' and cls._is_scoreable_ad_object(o)]
         scoreable = [u for u in users if (u.attributes or {}).get('isStale') is not None]
         if not scoreable:
             return None

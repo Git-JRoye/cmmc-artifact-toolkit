@@ -91,6 +91,19 @@ AU.L2-3.3.7 (time synchronization):
   - New finding type "Time Synchronization" (from the on-prem policy
     collector's new w32tm check) gets real, specific guidance instead of
     the generic policy-type fallback.
+
+Asset-scope integration (CMMC Level 2 Assessment Guide's 5 asset categories):
+  - A new "CMMC Assessment Scope" section (_build_asset_scope_html) renders
+    right after the compliance score, mirroring real CMMC methodology where
+    scope determination precedes everything else. Renders nothing if no
+    asset_scope was configured for the tenant.
+  - CRMA/Specialized-tagged devices/users get an inline badge
+    (_asset_category_note) right in the existing tables, in addition to the
+    dedicated scope section, so the tag is visible wherever that asset
+    already appears.
+  - Out-of-Scope assets are removed entirely upstream (orchestrator +
+    asset_scope.apply_asset_scope) before this exporter ever sees them —
+    this file only renders what's already been filtered.
 """
 
 import logging
@@ -195,6 +208,7 @@ class MSPReportExporter(ExporterBase):
         output_path: str,
         customer_name: Optional[str] = None,
         assessment_id: Optional[str] = None,
+        scope_result: Optional[Any] = None,
         **_,
     ) -> bool:
         try:
@@ -220,6 +234,7 @@ class MSPReportExporter(ExporterBase):
             html_content = self._generate_msp_report(
                 artifacts, customer_name, assessment_id,
                 software_href=software_filename if has_software else None,
+                scope_result=scope_result,
             )
             # Explicit UTF-8 write: without it, Python falls back to the
             # platform's default encoding (often cp1252 on Windows), which
@@ -269,6 +284,7 @@ class MSPReportExporter(ExporterBase):
         customer_name: Optional[str],
         assessment_id: Optional[str],
         software_href: Optional[str] = None,
+        scope_result: Optional[Any] = None,
     ) -> str:
         compliance_score = ComplianceScorer.calculate_overall_score(artifacts)
         coverage = ComplianceScorer.calculate_coverage(artifacts)
@@ -319,6 +335,7 @@ class MSPReportExporter(ExporterBase):
         present_evidence = self._present_evidence_keys(artifacts, onprem_eps, cloud_eps, ad_users_for_evidence)
         domain_coverage_html = self._build_domain_coverage_html(present_evidence)
         scoring_breakdown_html = self._build_scoring_breakdown_html(artifacts)
+        asset_scope_html = self._build_asset_scope_html(scope_result)
 
         # Purely data-derived — no TenantProfile reaches this exporter, so
         # this reflects what was actually collected, not what was
@@ -370,6 +387,7 @@ class MSPReportExporter(ExporterBase):
                 </div>
             </div>{coverage_banner_html}
         </div>
+{asset_scope_html}
 {scoring_breakdown_html}
 {domain_coverage_html}
         <div class="section">
@@ -417,7 +435,7 @@ class MSPReportExporter(ExporterBase):
                 else:
                     cloud_cell = '<span class="na">No</span>'
                 html += (
-                    f"                <tr><td>{ep.hostname}</td><td>{ep.ip_address}</td>"
+                    f"                <tr><td>{ep.hostname}{self._asset_category_note(ep)}</td><td>{ep.ip_address}</td>"
                     f"<td>{ep.os_version}</td>"
                     f"<td><span class=\"{fw_color}\">{ep.firewall_status or 'Unknown'}{fw_note}</span></td>"
                     f"<td><span class=\"{av_color}\">{ep.antivirus_status or 'Unknown'}</span></td>"
@@ -444,7 +462,7 @@ class MSPReportExporter(ExporterBase):
                 enc = meta.get('is_encrypted')
                 enc_color = 'status-good' if enc else 'status-warn'
                 html += (
-                    f"                <tr><td>{ep.hostname}</td><td>{ep.os_version}</td>"
+                    f"                <tr><td>{ep.hostname}{self._asset_category_note(ep)}</td><td>{ep.os_version}</td>"
                     f"<td><span class=\"{comp_color}\">{meta.get('compliance_state', 'Unknown')}</span></td>"
                     f"<td><span class=\"{enc_color}\">{enc}</span></td>"
                     f"<td>{meta.get('management_state', 'Unknown')}</td>"
@@ -513,7 +531,7 @@ class MSPReportExporter(ExporterBase):
                     mfa_cell = '<span class="status-neutral">Unknown</span>'
 
                 html += (
-                    f"                <tr><td>{name}</td><td>{'Entra ID' if is_cloud else 'On-Prem AD'}</td>"
+                    f"                <tr><td>{name}{self._asset_category_note(u, 'attributes')}</td><td>{'Entra ID' if is_cloud else 'On-Prem AD'}</td>"
                     f"<td><span class=\"{status_color}\">{status_label}</span></td>"
                     f"<td>{guest_cell}</td>"
                     f"<td><span class=\"{stale_color}\">{stale_label}</span></td>"
@@ -732,6 +750,100 @@ class MSPReportExporter(ExporterBase):
             present.append('guest_group_membership')
 
         return present
+
+    def _build_asset_scope_html(self, scope_result: Optional[Any]) -> str:
+        """CMMC Assessment Scope disclosure — placed right after the score,
+        before the scoring breakdown, mirroring the real CMMC methodology:
+        scope determination comes first, and everything else (which assets
+        get assessed, how) follows from it. Renders nothing at all if no
+        asset_scope was configured for this tenant (e.g. a GCC High client
+        whose entire environment is genuinely in scope) — nothing to
+        disclose in that case, not an empty/padded section.
+        """
+        if scope_result is None:
+            return ""
+
+        total_seen = scope_result.total_endpoints_seen + scope_result.total_users_seen
+        total_excluded = len(scope_result.excluded_endpoints) + len(scope_result.excluded_users)
+        total_documented = len(scope_result.documented_endpoints) + len(scope_result.documented_users)
+        total_assessed = total_seen - total_excluded  # documented items are kept, just not scored
+
+        rows = []
+        for hostname, exc in sorted(scope_result.documented_endpoints.items()):
+            rows.append(
+                f"                <tr><td>{hostname}</td><td>Device</td>"
+                f"<td>{exc.category.value.upper()}</td><td>{exc.reason}</td></tr>\n"
+            )
+        for identifier, exc in sorted(scope_result.documented_users.items()):
+            rows.append(
+                f"                <tr><td>{identifier}</td><td>User</td>"
+                f"<td>{exc.category.value.upper()}</td><td>{exc.reason}</td></tr>\n"
+            )
+        for hostname in sorted(scope_result.excluded_endpoints):
+            rows.append(
+                f"                <tr><td>{hostname}</td><td>Device</td>"
+                f"<td>OUT OF SCOPE</td><td class=\"na\">Excluded from this report entirely</td></tr>\n"
+            )
+        for identifier in sorted(scope_result.excluded_users):
+            rows.append(
+                f"                <tr><td>{identifier}</td><td>User</td>"
+                f"<td>OUT OF SCOPE</td><td class=\"na\">Excluded from this report entirely</td></tr>\n"
+            )
+
+        table_html = ""
+        if rows:
+            table_html = f"""            <table>
+                <tr><th>Identifier</th><th>Type</th><th>Category</th><th>Reason</th></tr>
+{"".join(rows)}
+            </table>
+"""
+
+        drift_html = ""
+        if scope_result.unmatched_exceptions:
+            items = "".join(
+                f"<li>{exc.identifier_type}: {exc.identifier} (declared as {exc.category.value}) — "
+                f"never matched a collected device/user this run</li>"
+                for exc in scope_result.unmatched_exceptions
+            )
+            drift_html = (
+                '<div class="alert-critical"><strong>Possible config drift:</strong> the following '
+                'asset_scope exceptions were declared but never matched anything actually collected '
+                'this run — check for typos, renamed devices, or accounts that no longer exist.'
+                f'<ul>{items}</ul></div>'
+            )
+
+        return f"""        <div class="section" id="sec-asset-scope">
+            <h2>CMMC Assessment Scope</h2>
+            <p style="font-size:0.92em;color:#475569;">
+                Per the CMMC Level 2 Assessment Guide's asset categorization: CUI Assets and
+                Security Protection Assets are fully assessed against all applicable practices;
+                Contractor Risk Managed Assets and Specialized Assets are documented here but
+                excluded from scoring; Out-of-Scope Assets are excluded entirely and do not
+                appear anywhere else in this report.
+            </p>
+            <table class="summary-table">
+                <tr><td>Total devices/users found:</td><td>{total_seen}</td></tr>
+                <tr><td>Fully assessed (CUI Asset / SPA):</td><td>{total_assessed}</td></tr>
+                <tr><td>Documented, not assessed (CRMA / Specialized):</td><td>{total_documented}</td></tr>
+                <tr><td>Excluded (Out-of-Scope):</td><td>{total_excluded}</td></tr>
+            </table>
+{table_html}{drift_html}
+        </div>
+"""
+
+    @staticmethod
+    def _asset_category_note(obj: Any, attr_source: str = "metadata") -> str:
+        """Small inline note appended next to a hostname/name in the
+        existing device/user tables, so a CRMA/Specialized item is visibly
+        flagged right where it's shown, not only in the separate CMMC
+        Assessment Scope section. Empty string for anything not tagged
+        (the default CUI Asset/SPA case — no visual noise for the common
+        case)."""
+        source = getattr(obj, attr_source, None) or {}
+        category = source.get('asset_category')
+        if not category:
+            return ""
+        return f' <span class="badge supporting">{category.upper()}</span>'
 
     def _build_scoring_breakdown_html(self, artifacts: Any) -> str:
         """Show the actual math behind the overall score — every category,

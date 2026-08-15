@@ -164,6 +164,7 @@ def main():
             result.collection, out_path,
             customer_name=result.display_name,
             assessment_id=f"PILOT-{result.tenant_key.upper()}",
+            scope_result=result.scope_result,
         )
         print(f"\nReport written: {out_path}")
 
