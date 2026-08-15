@@ -168,6 +168,10 @@ PRACTICES: Dict[str, Practice] = {
         "IA.L2-3.5.8", "IA", 2, "Password Reuse",
         "Prohibit password reuse for a specified number of generations.",
     ),
+    "SC.L2-3.13.16": Practice(
+        "SC.L2-3.13.16", "SC", 2, "Data at Rest",
+        "Protect the confidentiality of CUI at rest.",
+    ),
 }
 
 EVIDENCE_MAP: List[EvidenceMapping] = [
@@ -198,6 +202,18 @@ EVIDENCE_MAP: List[EvidenceMapping] = [
     EvidenceMapping(
         "account_lockout_enforcement", "Account lockout threshold policy",
         ["AC.L2-3.1.8"], Confidence.DIRECT,
+    ),
+    EvidenceMapping(
+        "storage_encryption_requirement", "Storage encryption required by Intune compliance policy",
+        ["SC.L2-3.13.16"], Confidence.DIRECT,
+    ),
+    EvidenceMapping(
+        "firewall_policy_requirement", "Active firewall required by Intune compliance policy",
+        ["SC.L1-3.13.1"], Confidence.SUPPORTING,
+    ),
+    EvidenceMapping(
+        "malware_protection_requirement", "Antivirus / real-time protection required by Intune compliance policy",
+        ["SI.L1-3.14.2"], Confidence.DIRECT,
     ),
     EvidenceMapping(
         "audit_log_collection", "Security event and audit log collection (on-prem Event Log + Entra sign-in/audit logs)",
