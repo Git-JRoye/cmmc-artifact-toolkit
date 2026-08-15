@@ -4,10 +4,14 @@ The cloud-plane counterpart to the on-prem ``EndpointCollector``. Pulls device
 compliance and management state from Intune for every enrolled device and maps
 it into the existing ``Endpoint`` model, so the current scorer and exporters
 work unchanged. Also pulls each device's detected-apps list (CM.L2-3.4.1
-system-inventory evidence — software, not just hardware/OS), and whether a
+system-inventory evidence — software, not just hardware/OS), whether a
 BitLocker recovery key is escrowed for the device (SC.L2-3.13.10 key
 management evidence — a device can report itself "encrypted" with no
-recoverable key anywhere, which is a real gap this closes).
+recoverable key anywhere, which is a real gap this closes), and the device's
+real-time Windows Defender health (SI.L1-3.14.2 — a stronger, more current
+signal than the compliance-policy REQUIREMENT check elsewhere in this
+project, since this is the device's actual state right now, not just what's
+demanded of it).
 
 Honest field mapping, not a forced fit:
     Intune's device data shape is different from a local PowerShell posture
@@ -72,8 +76,10 @@ version or permission problem. /beta was correct from the very first
 attempt; only the path was ever wrong.
 
 Graph application permissions required:
-  DeviceManagementManagedDevices.Read.All (existing — covers managedDevices
-  and its detectedApps sub-resource)
+  DeviceManagementManagedDevices.Read.All (existing — covers managedDevices,
+  its detectedApps sub-resource, AND windowsProtectionState, since all three
+  are sub-resources of the same managedDevices object with no separate
+  permission scope)
   BitLockerKey.ReadBasic.All (NEW — metadata-only recovery key existence
   check; deliberately NOT BitLockerKey.Read.All, see constraint above)
 """
@@ -129,6 +135,14 @@ class IntuneDeviceCollector(CollectorBase):
                 azure_ad_device_id = d.get("azureADDeviceId")
                 escrow_result = self._check_bitlocker_escrow(azure_ad_device_id, ep.hostname)
                 ep.metadata.update(escrow_result)
+
+                protection_result = self._check_realtime_protection(device_id, ep.hostname) if device_id else {
+                    "defender_realtime_protection_enabled": None,
+                    "defender_malware_protection_enabled": None,
+                    "defender_signature_overdue": None,
+                    "defender_protection_lookup_failed": False,
+                }
+                ep.metadata.update(protection_result)
                 out.append(ep)
         except Exception as e:
             logger.error("Intune device collection failed: %s", e)
@@ -225,6 +239,50 @@ class IntuneDeviceCollector(CollectorBase):
             else:
                 logger.warning("  Could not check BitLocker key escrow for device '%s': %s", hostname, e)
             return {"bitlocker_key_escrowed": None, "bitlocker_key_count": 0, "bitlocker_lookup_failed": True}
+
+    def _check_realtime_protection(self, device_id: str, hostname: str) -> Dict[str, Any]:
+        """Real-time Windows Defender health for this device — distinct from
+        (and stronger evidence than) the compliance-policy REQUIREMENT
+        checked elsewhere in this file. This is the device's actual current
+        state: is malware protection running, is real-time protection on,
+        are signatures overdue.
+
+        HONEST CONFIDENCE NOTE: deviceManagement/managedDevices/{id}/
+        windowsProtectionState is a real Intune Graph resource, but the
+        exact field names below are recalled, not independently verified
+        against current Graph documentation — same caveat class as every
+        other new endpoint added this session. If this errors, the response
+        body is logged; check that before assuming the field names are
+        wrong versus the whole resource needing /beta.
+
+        Three-state result per field, same pattern as everything else in
+        this file: True/False are real, confirmed answers; None means the
+        lookup wasn't attempted or failed — never silently treated as
+        "protection is off."
+        """
+        try:
+            state = self.graph.get_one(
+                f"deviceManagement/managedDevices/{device_id}/windowsProtectionState"
+            )
+            return {
+                "defender_realtime_protection_enabled": state.get("realTimeProtectionEnabled"),
+                "defender_malware_protection_enabled": state.get("malwareProtectionEnabled"),
+                "defender_signature_overdue": state.get("signatureUpdateOverdue"),
+                "defender_protection_lookup_failed": False,
+            }
+        except Exception as e:
+            detail = getattr(getattr(e, "response", None), "text", None)
+            if detail:
+                logger.warning("  Could not check real-time protection state for device '%s': %s | Response: %s",
+                                hostname, e, detail[:500])
+            else:
+                logger.warning("  Could not check real-time protection state for device '%s': %s", hostname, e)
+            return {
+                "defender_realtime_protection_enabled": None,
+                "defender_malware_protection_enabled": None,
+                "defender_signature_overdue": None,
+                "defender_protection_lookup_failed": True,
+            }
 
     @staticmethod
     def _map(d: dict) -> Endpoint:

@@ -229,6 +229,18 @@ EVIDENCE_MAP: List[EvidenceMapping] = [
         ["SC.L2-3.13.10"], Confidence.SUPPORTING,
     ),
     EvidenceMapping(
+        "cloud_realtime_malware_protection", "Real-time Windows Defender health for Intune-managed devices",
+        ["SI.L1-3.14.2"], Confidence.DIRECT,
+    ),
+    EvidenceMapping(
+        "enterprise_app_inventory", "Enterprise application / service principal inventory (processes acting on behalf of users)",
+        ["IA.L1-3.5.1"], Confidence.SUPPORTING,
+    ),
+    EvidenceMapping(
+        "security_alerts", "Security alerts from the unified Microsoft Graph Security API",
+        ["AU.L2-3.3.1"], Confidence.SUPPORTING,
+    ),
+    EvidenceMapping(
         "audit_log_collection", "Security event and audit log collection (on-prem Event Log + Entra sign-in/audit logs)",
         ["AU.L2-3.3.1"], Confidence.DIRECT,
     ),

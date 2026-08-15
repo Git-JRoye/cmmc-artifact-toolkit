@@ -109,7 +109,7 @@ logger = logging.getLogger(__name__)
 # a cloud-sourced policy/event record is never mistaken for an on-prem one
 # (or vice versa) in either place.
 _CLOUD_POLICY_TYPES = ('Conditional Access', 'Intune Configuration Profile')
-_CLOUD_EVENT_SOURCES = ('Entra Sign-In Logs', 'Entra Directory Audit Logs')
+_CLOUD_EVENT_SOURCES = ('Entra Sign-In Logs', 'Entra Directory Audit Logs', 'Microsoft Graph Security Alerts')
 
 # Shared stylesheet for both the main report and the standalone software
 # inventory page, so a visual change (or the "make it look more
@@ -285,6 +285,10 @@ class MSPReportExporter(ExporterBase):
     def _ad_groups(artifacts: Any) -> List:
         return [o for o in artifacts.ad_objects if o.object_class == 'group']
 
+    @staticmethod
+    def _service_principals(artifacts: Any) -> List:
+        return [o for o in artifacts.ad_objects if o.object_class == 'service_principal']
+
     def _generate_msp_report(
         self,
         artifacts: Any,
@@ -458,11 +462,12 @@ class MSPReportExporter(ExporterBase):
         if cloud_eps:
             html += f"""        <div class="section" id="sec-cloud-devices">
             <h2>Cloud-Managed Devices (Intune)</h2>
-            {self._satisfies_badge_html(['bitlocker_key_escrow'], present_evidence)}
+            {self._satisfies_badge_html(['bitlocker_key_escrow', 'cloud_realtime_malware_protection'], present_evidence)}
             <table>
                 <tr>
                     <th>Hostname</th><th>OS Version</th><th>Compliance State</th>
-                    <th>Encrypted</th><th>Recovery Key Escrowed</th><th>Management State</th><th>Owner</th>
+                    <th>Encrypted</th><th>Recovery Key Escrowed</th><th>Real-Time Protection</th>
+                    <th>Management State</th><th>Owner</th>
                     <th>Installed Software</th>
                 </tr>
 """
@@ -481,11 +486,26 @@ class MSPReportExporter(ExporterBase):
                     escrow_cell = '<span class="status-warn">Lookup failed</span>'
                 else:
                     escrow_cell = '<span class="na">Not checked</span>'
+
+                rtp = meta.get('defender_realtime_protection_enabled')
+                sig_overdue = meta.get('defender_signature_overdue')
+                if rtp is True and sig_overdue is False:
+                    rtp_cell = '<span class="status-good">Active, signatures current</span>'
+                elif rtp is True and sig_overdue is True:
+                    rtp_cell = '<span class="status-warn">Active, signatures overdue</span>'
+                elif rtp is False:
+                    rtp_cell = '<span class="status-bad">Not active</span>'
+                elif meta.get('defender_protection_lookup_failed'):
+                    rtp_cell = '<span class="status-warn">Lookup failed</span>'
+                else:
+                    rtp_cell = '<span class="na">Not checked</span>'
+
                 html += (
                     f"                <tr><td>{ep.hostname}{self._asset_category_note(ep)}</td><td>{ep.os_version}</td>"
                     f"<td><span class=\"{comp_color}\">{meta.get('compliance_state', 'Unknown')}</span></td>"
                     f"<td><span class=\"{enc_color}\">{enc}</span></td>"
                     f"<td>{escrow_cell}</td>"
+                    f"<td>{rtp_cell}</td>"
                     f"<td>{meta.get('management_state', 'Unknown')}</td>"
                     f"<td>{meta.get('owner_upn', 'Unknown')}</td>"
                     f"<td>{self._software_cell(ep, software_href)}</td></tr>\n"
@@ -586,6 +606,40 @@ class MSPReportExporter(ExporterBase):
                 html += (
                     f"                <tr><td>{name}</td><td>{'Entra ID' if is_cloud else 'On-Prem AD'}</td>"
                     f"<td>{desc}</td><td>{detail}</td></tr>\n"
+                )
+            html += "            </table>\n        </div>\n"
+
+        service_principals = self._service_principals(artifacts)
+        if service_principals:
+            html += f"""        <div class="section" id="sec-enterprise-apps">
+            <h2>Enterprise Applications</h2>
+            {self._satisfies_badge_html(['enterprise_app_inventory'], present_evidence)}
+            <p style="font-size:0.92em;color:#475569;">
+                Every application/service principal registered in this tenant — processes acting
+                with their own identity, not human users. Permission grant count only; specific
+                permission names are not yet resolved (see the collector's own notes).
+            </p>
+            <table>
+                <tr><th>Name</th><th>App ID</th><th>Enabled</th><th>Type</th><th>Permission Grants</th></tr>
+"""
+            for sp in service_principals:
+                attrs = sp.attributes or {}
+                enabled = attrs.get('account_enabled')
+                enabled_color = 'status-good' if enabled else 'status-warn'
+                grant_failed = attrs.get('permission_lookup_failed')
+                grant_count = attrs.get('permission_grant_count')
+                if grant_failed:
+                    grant_cell = '<span class="status-warn">Lookup failed</span>'
+                elif grant_count is not None:
+                    grant_cell = str(grant_count)
+                else:
+                    grant_cell = '<span class="na">Not checked</span>'
+                html += (
+                    f"                <tr><td>{sp.distinguished_name}</td>"
+                    f"<td style=\"font-size:0.85em;color:#64748b;\">{attrs.get('app_id', 'Unknown')}</td>"
+                    f"<td><span class=\"{enabled_color}\">{enabled}</span></td>"
+                    f"<td>{attrs.get('service_principal_type', 'Unknown')}</td>"
+                    f"<td>{grant_cell}</td></tr>\n"
                 )
             html += "            </table>\n        </div>\n"
 
@@ -700,6 +754,7 @@ class MSPReportExporter(ExporterBase):
         'malware_protection_requirement': 'sec-policy-compliance',
         'patch_management_policy': 'sec-policy-compliance',
         'bitlocker_key_escrow': 'sec-cloud-devices',
+        'cloud_realtime_malware_protection': 'sec-cloud-devices',
         'time_sync': 'sec-policy-compliance',
         'audit_log_collection': 'sec-security-events',
         'audit_user_traceability': 'sec-security-events',
@@ -707,6 +762,8 @@ class MSPReportExporter(ExporterBase):
         'account_identification': 'sec-ad-users',
         'privileged_role_tracking': 'sec-ad-users',
         'guest_group_membership': 'sec-ad-groups',
+        'enterprise_app_inventory': 'sec-enterprise-apps',
+        'security_alerts': 'sec-security-events',
     }
 
     def _present_evidence_keys(self, artifacts: Any, onprem_eps: List, cloud_eps: List, ad_users: List) -> List[str]:
@@ -764,6 +821,8 @@ class MSPReportExporter(ExporterBase):
             present.append('patch_management_policy')
         if any((ep.metadata or {}).get('bitlocker_key_escrowed') is not None for ep in artifacts.endpoints):
             present.append('bitlocker_key_escrow')
+        if any((ep.metadata or {}).get('defender_realtime_protection_enabled') is not None for ep in artifacts.endpoints):
+            present.append('cloud_realtime_malware_protection')
 
         if artifacts.security_events:
             present.append('audit_log_collection')
@@ -788,6 +847,12 @@ class MSPReportExporter(ExporterBase):
 
         if any(getattr(u, 'attributes', {}).get('isGuest') is not None for u in ad_users):
             present.append('guest_group_membership')
+
+        if any(o.object_class == 'service_principal' for o in artifacts.ad_objects):
+            present.append('enterprise_app_inventory')
+
+        if any(e.source == 'Microsoft Graph Security Alerts' for e in artifacts.security_events):
+            present.append('security_alerts')
 
         return present
 
@@ -1346,7 +1411,7 @@ class MSPReportExporter(ExporterBase):
             disclosure_bits.append(f"all {len(severe)} Critical/Error event(s) shown")
         disclosure_bits.append(f"{len(shown_info)} of {len(informational)} Information-level event(s) shown as a sample")
 
-        badge = self._satisfies_badge_html(['audit_log_collection', 'audit_user_traceability'], present_evidence)
+        badge = self._satisfies_badge_html(['audit_log_collection', 'audit_user_traceability', 'security_alerts'], present_evidence)
         html = f"""        <div class="section" id="sec-security-events">
             <h2>Security Events</h2>
             {badge}
@@ -1682,6 +1747,42 @@ class MSPReportExporter(ExporterBase):
                                    'the encrypted data permanently unrecoverable — this directly '
                                    'implicates SC.L2-3.13.10 (cryptographic key management includes '
                                    'the ability to recover keys, not just create them).',
+            })
+
+        # Real-time protection state and signature freshness, checked only
+        # when affirmatively confirmed (never on an unknown/failed lookup).
+        # This is a stronger, more current signal than the compliance-
+        # policy REQUIREMENT check elsewhere — that shows what's demanded;
+        # this shows what's actually true on the device right now.
+        rtp_disabled = [
+            ep.hostname for ep in intune_eps
+            if self._intune_signal(ep).get('defender_realtime_protection_enabled') is False
+        ]
+        if rtp_disabled:
+            findings.append({
+                'title': 'Real-Time Malware Protection Not Active',
+                'severity': 'Critical',
+                'description': f'The following managed devices do not have real-time malware '
+                                f'protection currently active: {", ".join(rtp_disabled)}',
+                'recommendation': 'Investigate why real-time protection is disabled on these devices '
+                                   'and re-enable it — this directly implicates SI.L1-3.14.2 '
+                                   '(malicious code protection).',
+            })
+
+        sig_overdue = [
+            ep.hostname for ep in intune_eps
+            if self._intune_signal(ep).get('defender_signature_overdue') is True
+        ]
+        if sig_overdue:
+            findings.append({
+                'title': 'Antivirus Signatures Overdue',
+                'severity': 'High',
+                'description': f'The following managed devices have overdue antivirus signature '
+                                f'updates: {", ".join(sig_overdue)}',
+                'recommendation': 'Confirm these devices can reach Microsoft Update or the '
+                                   'Defender signature source and are checking in regularly. '
+                                   'Outdated signatures weaken malicious code detection '
+                                   '(SI.L1-3.14.2) regardless of real-time protection being active.',
             })
 
         # Policy findings reuse the same pass/fail rules as the scorer, so an

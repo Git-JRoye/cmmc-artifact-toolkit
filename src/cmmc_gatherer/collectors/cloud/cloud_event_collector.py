@@ -1,13 +1,19 @@
 """Cloud security event collector (Microsoft Graph).
 
-The cloud-plane counterpart to the on-prem ``EventLogCollector``. Pulls two
-Entra log sources and maps both into the existing ``SecurityEvent`` model so
-the current scorer (event_logging dimension) and MSP report work unchanged:
+The cloud-plane counterpart to the on-prem ``EventLogCollector``. Pulls
+three Entra/Graph log sources and maps all into the existing
+``SecurityEvent`` model so the current scorer (event_logging dimension)
+and MSP report work unchanged:
 
   - Sign-in logs (auditLogs/signIns) — authentication attempts, risk level,
     conditional access outcome
   - Directory audit logs (auditLogs/directoryAudits) — administrative and
     configuration-change activity (role assignments, policy changes, etc.)
+  - Security alerts (security/alerts_v2) — alerts surfaced through the
+    unified Microsoft Graph Security API, from whichever security products
+    are actually deployed (Defender for Endpoint, Defender for Office 365,
+    Defender for Identity, Sentinel if connected) — real detections, not
+    just configuration/audit trail.
 
 Level mapping (Critical/Error/Warning/Information) is a judgment call, same
 as the on-prem collector's reliance on Windows' own event levels — there is
@@ -21,21 +27,32 @@ Critical/Error ratio check:
   - A successful, non-risky sign-in -> Information.
   - A directory audit entry with result == 'failure' -> Error.
   - Any other directory audit entry -> Information.
+  - A security alert with severity 'high' -> Critical, 'medium' -> Error,
+    'low' -> Warning, 'informational' (or anything else) -> Information —
+    reusing Microsoft's own stated severity rather than inventing a new scale.
 
 Volume is bounded the same way the on-prem collector bounds it (lookback
 window + max event cap), both because sign-in logs can be very large in an
 active tenant and to keep this predictable rather than accidentally pulling
 a tenant's entire retained audit history on every run.
 
-HONEST CONFIDENCE NOTE: both endpoints are real, documented v1.0 Graph
-endpoints, but sign-in log retention varies by Entra ID license tier (as
-little as 7 days on some tiers) — an empty or short result set may reflect a
-genuine retention limit, not a collection failure. This has not yet been
-pilot-tested against a live tenant with real sign-in volume.
+HONEST CONFIDENCE NOTE: sign-in and directory audit endpoints are real,
+documented v1.0 Graph endpoints, but sign-in log retention varies by Entra
+ID license tier (as little as 7 days on some tiers) — an empty or short
+result set may reflect a genuine retention limit, not a collection failure.
 
-Graph application permission required: AuditLog.Read.All (already required
-for the Entra identity collector's stale-account detection — no new
-permission needed for this collector specifically).
+security/alerts_v2 specifically is LOWER confidence than the other two —
+Microsoft has moved this API between versions before (the older
+security/alerts was deprecated in favor of alerts_v2), and this is built
+against v1.0 with a createdDateTime filter, both recalled rather than
+independently verified against current documentation. If this 404s or
+400s on a real pilot, check the response body before assuming a logic
+error — the same discipline every other new endpoint this session has
+needed.
+
+Graph application permission required: AuditLog.Read.All (existing, sign-
+in + directory audit logs) and SecurityEvents.Read.All (NEW, for
+security/alerts_v2).
 """
 
 import logging
@@ -49,10 +66,17 @@ from ...cloud.graph import GraphClient
 logger = logging.getLogger(__name__)
 
 _RISKY_LEVELS = {"high", "medium"}
+_ALERT_SEVERITY_TO_LEVEL = {
+    "high": "Critical",
+    "medium": "Error",
+    "low": "Warning",
+    "informational": "Information",
+}
 
 
 class CloudSecurityEventCollector(CollectorBase):
-    """Collects Entra sign-in and directory audit log events via Microsoft Graph."""
+    """Collects Entra sign-in logs, directory audit logs, and Graph
+    Security API alerts via Microsoft Graph."""
 
     def __init__(self, graph: GraphClient, lookback_hours: int = 168, max_events: int = 2000):
         self.graph = graph
@@ -72,6 +96,14 @@ class CloudSecurityEventCollector(CollectorBase):
             events += self._collect_directory_audits(cutoff_iso)
         except Exception as e:
             logger.error("Entra directory audit log collection failed: %s", e)
+        try:
+            events += self._collect_security_alerts(cutoff_iso)
+        except Exception as e:
+            detail = getattr(getattr(e, "response", None), "text", None)
+            if detail:
+                logger.error("Security alerts collection failed: %s | Response: %s", e, detail[:500])
+            else:
+                logger.error("Security alerts collection failed: %s", e)
         logger.info("Cloud security event collection complete: %d event(s)", len(events))
         return events
 
@@ -189,5 +221,50 @@ class CloudSecurityEventCollector(CollectorBase):
                 "result": record.get("result"),
                 "result_reason": record.get("resultReason"),
                 "target_resources": target_names,
+            },
+        )
+
+    # -- security alerts (Graph Security API) --------------------------------
+
+    def _collect_security_alerts(self, cutoff_iso: str) -> List[SecurityEvent]:
+        out: List[SecurityEvent] = []
+        params = {
+            "$filter": f"createdDateTime ge {cutoff_iso}",
+            "$top": "999",
+        }
+        for record in self.graph.get_all("security/alerts_v2", params=params):
+            out.append(self._map_security_alert(record))
+            if len(out) >= self.max_events:
+                logger.warning("  Security alert cap (%d) reached — more alerts may exist "
+                                "in the lookback window than were collected", self.max_events)
+                break
+        logger.info("  Security alerts: %d", len(out))
+        return out
+
+    @staticmethod
+    def _map_security_alert(record: dict) -> SecurityEvent:
+        severity = (record.get("severity") or "informational").lower()
+        level = _ALERT_SEVERITY_TO_LEVEL.get(severity, "Information")
+
+        vendor_info = record.get("vendorInformation") or {}
+        provider = vendor_info.get("provider") or "Unknown Provider"
+        title = record.get("title") or "Security alert"
+
+        return SecurityEvent(
+            event_id=0,
+            source="Microsoft Graph Security Alerts",
+            timestamp=record.get("createdDateTime") or "",
+            message=f"[{provider}] {title}",
+            level=level,
+            computer="N/A (cloud security alert)",
+            user=None,
+            event_data={
+                "graph_id": record.get("id"),
+                "severity": record.get("severity"),
+                "status": record.get("status"),
+                "category": record.get("category"),
+                "provider": provider,
+                "classification": record.get("classification"),
+                "determination": record.get("determination"),
             },
         )
