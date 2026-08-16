@@ -52,7 +52,7 @@ class ComplianceScorer:
     # or assessor never has to take the final percentage on faith — they can
     # see exactly what was measured, how much it counted, and what it scored.
     DIMENSION_DESCRIPTIONS = {
-        'firewall': "Windows Firewall enabled across all profiles (Domain/Private/Public) on on-prem endpoints.",
+        'firewall': "Windows Firewall enabled across all profiles (Domain/Private/Public) on on-prem endpoints, plus real per-device firewall status for Intune-managed cloud devices.",
         'antivirus': "Antivirus / Windows Defender real-time protection active on on-prem endpoints.",
         'updates': "On-prem endpoints have installed patch/hotfix history recorded (presence check, not recency).",
         'policies': "Local security policy, UAC, audit policy, Conditional Access, and Intune configuration profiles meeting their individual baselines.",
@@ -145,12 +145,43 @@ class ComplianceScorer:
 
     @classmethod
     def _score_firewall(cls, artifacts: ArtifactCollection) -> Optional[int]:
-        applicable = cls._onprem_endpoints(artifacts)
-        if not applicable:
+        """Blends on-prem Windows Firewall status with real, per-device
+        cloud (Intune) firewall status — the latter fetched via a bulk
+        report call (see intune_device_collector.py's
+        _collect_firewall_statuses), not the compliance-policy
+        REQUIREMENT check elsewhere in this project. This is the actual
+        observed state on cloud-managed devices, closing the gap that
+        previously made this dimension always show N/A for cloud-only
+        tenants.
+        """
+        onprem_applicable = cls._onprem_endpoints(artifacts)
+        onprem_points = {'Enabled': 100, 'Partial': 50, 'Disabled': 0}
+        onprem_scores = [onprem_points.get(ep.firewall_status, 0) for ep in onprem_applicable]
+
+        # Only "Enabled" and "Disabled" are confidently known-good/known-bad
+        # labels from a real pilot run. Intune's own admin UI also shows
+        # "Limited" and "Temporarily disabled (default)" as possible states,
+        # but the exact strings for those aren't confirmed — rather than
+        # guess a partial-credit number for a label that's never actually
+        # been observed, those (and anything else unrecognized) are excluded
+        # from scoring entirely, the same "never guess" discipline used
+        # everywhere else in this scorer. Logged so a real occurrence is
+        # visible, not silently dropped.
+        cloud_known = {'Enabled': 100, 'Disabled': 0}
+        cloud_scores = []
+        for ep in artifacts.endpoints:
+            if ep.firewall_status is not None or not cls._is_scoreable_endpoint(ep):
+                continue
+            status = (ep.metadata or {}).get('cloud_firewall_status')
+            if status in cloud_known:
+                cloud_scores.append(cloud_known[status])
+            elif status is not None:
+                logger.warning("Unrecognized cloud firewall status '%s' excluded from scoring", status)
+
+        all_scores = onprem_scores + cloud_scores
+        if not all_scores:
             return None
-        points = {'Enabled': 100, 'Partial': 50, 'Disabled': 0}
-        total = sum(points.get(ep.firewall_status, 0) for ep in applicable)
-        return int(total / len(applicable))
+        return int(sum(all_scores) / len(all_scores))
 
     @classmethod
     def _score_antivirus(cls, artifacts: ArtifactCollection) -> Optional[int]:

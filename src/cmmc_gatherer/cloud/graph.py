@@ -198,3 +198,27 @@ class GraphClient:
                 continue
             resp.raise_for_status()
             return resp.json()
+
+    def post_one(self, path: str, json_body: Dict[str, Any], retries: int = 1) -> Dict[str, Any]:
+        """POST a JSON body to a Graph endpoint and return the single JSON
+        object response — for the handful of Graph resources (like Intune's
+        own reports/getCachedReport) that are read-only queries but shaped
+        as a POST with a request body, not a GET with query params. Same
+        429-throttle handling as get_one, for the same reason: this is
+        exactly the kind of call likely to run in a loop (paginating a
+        large report) and hit rate limits."""
+        import requests
+
+        url = f"{self.base}/{path.lstrip('/')}"
+        attempt = 0
+        while True:
+            resp = requests.post(url, headers=self._headers(), json=json_body, timeout=60)
+            if resp.status_code == 429 and attempt < retries:
+                import time
+                wait = int(resp.headers.get("Retry-After", "5"))
+                logger.warning("Graph throttled; sleeping %ss", wait)
+                time.sleep(wait)
+                attempt += 1
+                continue
+            resp.raise_for_status()
+            return resp.json()

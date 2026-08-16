@@ -463,11 +463,11 @@ class MSPReportExporter(ExporterBase):
         if cloud_eps:
             html += f"""        <div class="section" id="sec-cloud-devices">
             <h2>Cloud-Managed Devices (Intune)</h2>
-            {self._satisfies_badge_html(['bitlocker_key_escrow', 'cloud_realtime_malware_protection'], present_evidence)}
+            {self._satisfies_badge_html(['bitlocker_key_escrow', 'cloud_realtime_malware_protection', 'cloud_firewall_status'], present_evidence)}
             <table>
                 <tr>
                     <th>Hostname</th><th>OS Version</th><th>Compliance State</th>
-                    <th>Encrypted</th><th>Recovery Key Escrowed</th><th>Real-Time Protection</th>
+                    <th>Encrypted</th><th>Recovery Key Escrowed</th><th>Firewall</th><th>Real-Time Protection</th>
                     <th>Management State</th><th>Ownership</th><th>Owner</th>
                     <th>Installed Software</th>
                 </tr>
@@ -487,6 +487,18 @@ class MSPReportExporter(ExporterBase):
                     escrow_cell = '<span class="status-warn">Lookup failed</span>'
                 else:
                     escrow_cell = '<span class="na">Not checked</span>'
+
+                cloud_fw = meta.get('cloud_firewall_status')
+                if cloud_fw == 'Enabled':
+                    fw_cell = '<span class="status-good">Enabled</span>'
+                elif cloud_fw == 'Disabled':
+                    fw_cell = '<span class="status-bad">Disabled</span>'
+                elif cloud_fw:
+                    fw_cell = f'<span class="status-warn">{cloud_fw}</span>'
+                elif meta.get('cloud_firewall_lookup_failed'):
+                    fw_cell = '<span class="status-warn">Lookup failed</span>'
+                else:
+                    fw_cell = '<span class="na">Not checked</span>'
 
                 rtp = meta.get('defender_realtime_protection_enabled')
                 sig_overdue = meta.get('defender_signature_overdue')
@@ -514,6 +526,7 @@ class MSPReportExporter(ExporterBase):
                     f"<td><span class=\"{comp_color}\">{meta.get('compliance_state', 'Unknown')}</span></td>"
                     f"<td><span class=\"{enc_color}\">{enc}</span></td>"
                     f"<td>{escrow_cell}</td>"
+                    f"<td>{fw_cell}</td>"
                     f"<td>{rtp_cell}</td>"
                     f"<td>{meta.get('management_state', 'Unknown')}</td>"
                     f"<td>{ownership_cell}</td>"
@@ -776,6 +789,7 @@ class MSPReportExporter(ExporterBase):
         'patch_management_policy': 'sec-policy-compliance',
         'bitlocker_key_escrow': 'sec-cloud-devices',
         'cloud_realtime_malware_protection': 'sec-cloud-devices',
+        'cloud_firewall_status': 'sec-cloud-devices',
         'time_sync': 'sec-policy-compliance',
         'audit_log_collection': 'sec-security-events',
         'audit_user_traceability': 'sec-security-events',
@@ -846,6 +860,8 @@ class MSPReportExporter(ExporterBase):
             present.append('bitlocker_key_escrow')
         if any((ep.metadata or {}).get('defender_realtime_protection_enabled') is not None for ep in artifacts.endpoints):
             present.append('cloud_realtime_malware_protection')
+        if any((ep.metadata or {}).get('cloud_firewall_status') is not None for ep in artifacts.endpoints):
+            present.append('cloud_firewall_status')
 
         if artifacts.security_events:
             present.append('audit_log_collection')

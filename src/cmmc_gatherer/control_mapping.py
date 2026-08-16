@@ -279,6 +279,10 @@ EVIDENCE_MAP: List[EvidenceMapping] = [
         ["SC.L1-3.13.1"], Confidence.SUPPORTING,
     ),
     EvidenceMapping(
+        "cloud_firewall_status", "Real per-device Windows Firewall status for Intune-managed devices (bulk report)",
+        ["SC.L1-3.13.1"], Confidence.SUPPORTING,
+    ),
+    EvidenceMapping(
         "privileged_role_tracking", "Privileged role / group membership tracking",
         ["AC.L2-3.1.7"], Confidence.SUPPORTING,
     ),
