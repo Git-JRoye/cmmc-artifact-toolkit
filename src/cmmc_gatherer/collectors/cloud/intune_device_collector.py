@@ -143,11 +143,55 @@ class IntuneDeviceCollector(CollectorBase):
                     "defender_protection_lookup_failed": False,
                 }
                 ep.metadata.update(protection_result)
+
+                if device_id:
+                    ep.metadata["owner_type"] = self._check_ownership_type(device_id, ep.hostname)
                 out.append(ep)
         except Exception as e:
             logger.error("Intune device collection failed: %s", e)
         logger.info("Intune device collection complete: %d device(s)", len(out))
         return out
+
+    def _check_ownership_type(self, device_id: str, hostname: str) -> Optional[str]:
+        """Fetch this one device's ownership type ("company" or "personal"/
+        BYOD) in complete isolation from the main device-listing call.
+
+        PILOT FINDING (real, confirmed): a first attempt added "ownerType"
+        directly to the shared $select on the main deviceManagement/
+        managedDevices LIST call and caused a 400 Bad Request that took
+        down the ENTIRE device table for every device at once — a much
+        worse failure mode than any other lookup in this file, since a bad
+        field name there breaks the query that finds devices at all, not
+        just one device's data. This method exists specifically to never
+        repeat that mistake: it is a separate, per-device call that can
+        fail in isolation (returning None for just this one device) without
+        ever affecting the main device list again.
+
+        HONEST CONFIDENCE NOTE: the property name used here,
+        managedDeviceOwnerType (not the original wrong guess, "ownerType"),
+        is recalled with better — but still not independently verified —
+        confidence, based on this resource's own naming convention
+        elsewhere (e.g. deviceEnrollmentType, not enrollmentType). If this
+        also fails, the response body is logged; check it before guessing
+        a third name.
+
+        Returns the raw value ("company"/"personal"/"unknown") or None if
+        not attempted or the lookup failed — never guessed at.
+        """
+        try:
+            result = self.graph.get_one(
+                f"deviceManagement/managedDevices/{device_id}",
+                params={"$select": "id,managedDeviceOwnerType"},
+            )
+            return result.get("managedDeviceOwnerType")
+        except Exception as e:
+            detail = getattr(getattr(e, "response", None), "text", None)
+            if detail:
+                logger.warning("  Could not check ownership type for device '%s': %s | Response: %s",
+                                hostname, e, detail[:500])
+            else:
+                logger.warning("  Could not check ownership type for device '%s': %s", hostname, e)
+            return None
 
     def _collect_detected_apps(self, device_id: str, hostname: str) -> tuple:
         """Per-device software inventory. Failure here is isolated to this one
@@ -312,20 +356,11 @@ class IntuneDeviceCollector(CollectorBase):
                 "azure_ad_device_id": d.get("azureADDeviceId"),
                 "owner_upn": d.get("userPrincipalName"),
                 "enrollment_type": d.get("deviceEnrollmentType"),
-                # PILOT FINDING (real, confirmed, reverted): "ownerType" was
-                # added to the shared $select above and caused a 400 Bad
-                # Request on the ENTIRE managedDevices list call against a
-                # real tenant — not a per-device sub-resource failure like
-                # detectedApps/bitlocker/windowsProtectionState (which fail
-                # in isolation), but the core query that finds every device
-                # in the first place. A wrong field name here is a much
-                # worse failure mode than anywhere else in this file, so
-                # it's been removed from $select entirely rather than
-                # guessed at a second time in the same risky spot. This key
-                # is always None until ownership is re-added via a safely
-                # ISOLATED per-device (or separate list) call that can fail
-                # without taking down the whole device table — a real,
-                # deliberately deferred follow-up, not forgotten.
-                "owner_type": d.get("ownerType"),
+                # NOTE: owner_type is NOT set here. It's fetched via a
+                # separate, isolated per-device call in collect()
+                # (_check_ownership_type) after _map() runs — deliberately
+                # kept out of the main managedDevices $select after a real
+                # pilot run confirmed that including "ownerType" there
+                # caused a 400 that took down the ENTIRE device list.
             },
         )
