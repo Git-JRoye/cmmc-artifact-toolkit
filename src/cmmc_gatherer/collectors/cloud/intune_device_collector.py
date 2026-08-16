@@ -114,7 +114,7 @@ class IntuneDeviceCollector(CollectorBase):
             "$select": "id,deviceName,operatingSystem,osVersion,complianceState,"
                        "isEncrypted,managementState,jailBroken,lastSyncDateTime,"
                        "model,manufacturer,serialNumber,azureADDeviceId,"
-                       "userPrincipalName,deviceEnrollmentType,ownerType",
+                       "userPrincipalName,deviceEnrollmentType",
             "$top": "999",
         }
         out: List[Endpoint] = []
@@ -312,16 +312,20 @@ class IntuneDeviceCollector(CollectorBase):
                 "azure_ad_device_id": d.get("azureADDeviceId"),
                 "owner_upn": d.get("userPrincipalName"),
                 "enrollment_type": d.get("deviceEnrollmentType"),
-                # "company" or "personal" (BYOD). Real, structural
-                # explanation for why software inventory is often empty on
-                # some devices and not others in the same tenant — Intune
-                # deliberately restricts app-inventory collection on
-                # personally-owned devices for user privacy, typically
-                # limiting it to company-deployed apps only. Confirmed
-                # against a real tenant: the one device with real detected-
-                # apps data was Corporate-owned; three Personal-owned
-                # devices all showed a genuinely empty (not failed)
-                # inventory — this is expected BYOD behavior, not a gap.
+                # PILOT FINDING (real, confirmed, reverted): "ownerType" was
+                # added to the shared $select above and caused a 400 Bad
+                # Request on the ENTIRE managedDevices list call against a
+                # real tenant — not a per-device sub-resource failure like
+                # detectedApps/bitlocker/windowsProtectionState (which fail
+                # in isolation), but the core query that finds every device
+                # in the first place. A wrong field name here is a much
+                # worse failure mode than anywhere else in this file, so
+                # it's been removed from $select entirely rather than
+                # guessed at a second time in the same risky spot. This key
+                # is always None until ownership is re-added via a safely
+                # ISOLATED per-device (or separate list) call that can fail
+                # without taking down the whole device table — a real,
+                # deliberately deferred follow-up, not forgotten.
                 "owner_type": d.get("ownerType"),
             },
         )

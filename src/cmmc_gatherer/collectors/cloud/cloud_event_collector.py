@@ -51,8 +51,19 @@ error — the same discipline every other new endpoint this session has
 needed.
 
 Graph application permission required: AuditLog.Read.All (existing, sign-
-in + directory audit logs) and SecurityEvents.Read.All (NEW, for
+in + directory audit logs) and SecurityAlert.Read.All (NEW, for
 security/alerts_v2).
+
+PILOT FINDING (real, confirmed): the first version of this docstring named
+SecurityEvents.Read.All as the required permission for security/alerts_v2 —
+that was wrong. A real 403 against a live tenant gave Graph's own error
+text: "Missing application roles. API required roles: SecurityAlert.Read.All,
+SecurityAlert.ReadWrite.All, SecurityIncident.Read.All,
+SecurityIncident.ReadWrite.All." SecurityAlert.Read.All is the correct,
+least-privileged one of those four for a read-only compliance tool. If this
+still 403s after adding SecurityAlert.Read.All and granting admin consent,
+the real error message will say so explicitly — check it before assuming
+another permission is needed.
 """
 
 import logging
