@@ -38,16 +38,40 @@ together (a polymorphic directoryObject collection); filtered here to
 via _fetch_privileged_role_members and would otherwise be duplicated under a
 different label.
 
+Granular authentication method detail (per-user, users/{id}/authentication/
+methods): a more precise, more DIRECT signal for IA.L2-3.5.3 than the
+existing isMfaRegistered flag alone — this shows WHICH specific method
+type(s) a user has registered (FIDO2 key, Microsoft Authenticator, SMS,
+etc.), so an account relying only on a known-weaker method (SMS) is
+distinguishable from one using a strong method (FIDO2), even though both
+show isMfaRegistered=True in the existing MFA registration report.
+
+HONEST, IMPORTANT LIMITATION on federated identities, confirmed as a real
+concern before building this rather than after: for a user authenticated
+via a federated external IdP (an on-prem AD FS trust, or a third-party IdP
+like Okta/Ping federated into Entra), the actual authentication — including
+any MFA — happens AT that external IdP, not inside Entra. This endpoint can
+show an empty or sparse methods list for such a user NOT because they lack
+real MFA, but because Entra itself never brokered that authentication step
+and has no visibility into it. This data is deliberately kept as
+SUPPLEMENTARY detail only — it never replaces or overrides the existing
+isMfaRegistered-based "Privileged Account Without MFA" finding, and is
+labeled in the report as reflecting methods registered directly with Entra,
+specifically so a federated user's sparse data is never misread as a
+confirmed MFA gap.
+
 Graph application permissions required for this file's full functionality:
   User.Read.All, Group.Read.All, AuditLog.Read.All (existing)
   RoleManagement.Read.Directory (NEW — for privileged role membership)
   Reports.Read.All (NEW — for MFA registration status; unverified exact
   requirement, see note above)
+  UserAuthenticationMethod.Read.All (NEW — for granular per-user
+  authentication method detail; recalled, not independently verified)
 """
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 from ..base import CollectorBase
 from ...models.artifacts import ADObject
@@ -56,6 +80,24 @@ from ...cloud.graph import GraphClient
 logger = logging.getLogger(__name__)
 
 _STALE_AFTER_DAYS = 90
+
+# Readable label + strength tier per authentication method @odata.type.
+# "not_mfa" methods (password) are listed for completeness but never
+# contribute to the weakest-real-MFA-tier calculation, since a password
+# is the primary factor, not a second one. An unrecognized @odata.type
+# falls back to its raw type name with tier "unknown" rather than being
+# silently dropped — see _fetch_auth_method_details' own confidence note.
+_AUTH_METHOD_LABELS = {
+    "#microsoft.graph.fido2AuthenticationMethod": ("FIDO2 Security Key", "strong"),
+    "#microsoft.graph.windowsHelloForBusinessAuthenticationMethod": ("Windows Hello for Business", "strong"),
+    "#microsoft.graph.microsoftAuthenticatorAuthenticationMethod": ("Microsoft Authenticator", "strong"),
+    "#microsoft.graph.softwareOathAuthenticationMethod": ("Authenticator App (OATH)", "moderate"),
+    "#microsoft.graph.phoneAuthenticationMethod": ("Phone (SMS/Voice Call)", "weak"),
+    "#microsoft.graph.emailAuthenticationMethod": ("Email", "weak"),
+    "#microsoft.graph.temporaryAccessPassAuthenticationMethod": ("Temporary Access Pass", "temporary"),
+    "#microsoft.graph.passwordAuthenticationMethod": ("Password", "not_mfa"),
+}
+_STRENGTH_RANK = {"strong": 3, "moderate": 2, "weak": 1, "temporary": 0, "unknown": 0}
 
 
 class EntraIdentityCollector(CollectorBase):
@@ -151,6 +193,41 @@ class EntraIdentityCollector(CollectorBase):
             logger.warning("  Could not fetch group memberships for user %s: %s", user_id, e)
         return groups
 
+    # -- granular authentication method detail -------------------------------
+
+    def _fetch_auth_method_details(self, user_id: str) -> Tuple[List[str], Optional[str], bool]:
+        """Per-user granular authentication method detail via
+        users/{id}/authentication/methods — see the module docstring's
+        federated-identity caveat before using this data anywhere.
+
+        Failure here is isolated to this one user — never affects another
+        user's data, matching every other per-item lookup in this file.
+
+        Returns (method_labels, weakest_real_mfa_tier, failed):
+          method_labels — readable labels for every method found (may
+            include "Password", which doesn't count as a second factor)
+          weakest_real_mfa_tier — the weakest tier among registered REAL
+            MFA methods (excludes Password), or None if no real MFA
+            method was found or the lookup failed — never guessed at
+          failed — True only if the Graph call itself errored
+        """
+        try:
+            labels: List[str] = []
+            tiers: List[str] = []
+            for method in self.graph.get_all(f"users/{user_id}/authentication/methods"):
+                odata_type = method.get("@odata.type") or ""
+                label, tier = _AUTH_METHOD_LABELS.get(
+                    odata_type, (odata_type.replace("#microsoft.graph.", "") or "Unknown method", "unknown")
+                )
+                labels.append(label)
+                if tier != "not_mfa":
+                    tiers.append(tier)
+            weakest = min(tiers, key=lambda t: _STRENGTH_RANK.get(t, 0)) if tiers else None
+            return labels, weakest, False
+        except Exception as e:
+            logger.warning("  Could not fetch authentication method detail for user %s: %s", user_id, e)
+            return [], None, True
+
     # -- users ------------------------------------------------------------
 
     def _collect_users(self, privileged_by_user_id: Dict[str, List[str]],
@@ -172,6 +249,9 @@ class EntraIdentityCollector(CollectorBase):
             roles = privileged_by_user_id.get(uid, [])
             mfa = mfa_by_user_id.get(uid)
             groups = self._fetch_user_group_memberships(uid) if uid else []
+            auth_method_labels, weakest_tier, auth_lookup_failed = (
+                self._fetch_auth_method_details(uid) if uid else ([], None, False)
+            )
 
             out.append(ADObject(
                 distinguished_name=u.get("userPrincipalName") or uid or "unknown",
@@ -190,6 +270,9 @@ class EntraIdentityCollector(CollectorBase):
                     "isPrivileged": bool(roles) if privileged_by_user_id or roles else None,
                     "isMfaRegistered": mfa.get("isMfaRegistered") if mfa else None,
                     "mfaMethods": mfa.get("methodsRegistered") if mfa else None,
+                    "authMethodDetails": auth_method_labels,
+                    "weakestAuthMethodTier": weakest_tier,
+                    "authMethodLookupFailed": auth_lookup_failed,
                     "source": "entra",
                 },
                 group_memberships=groups,

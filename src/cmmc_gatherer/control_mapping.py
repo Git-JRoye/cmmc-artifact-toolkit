@@ -247,6 +247,18 @@ EVIDENCE_MAP: List[EvidenceMapping] = [
         ["AC.L2-3.1.7"], Confidence.SUPPORTING,
     ),
     EvidenceMapping(
+        "intune_rbac_assignment", "Intune-specific administrative role assignment (distinct from Entra directory roles)",
+        ["AC.L2-3.1.7"], Confidence.SUPPORTING,
+    ),
+    EvidenceMapping(
+        "app_protection_policy", "Intune App Protection Policy (MAM) settings for personally-owned/BYOD devices",
+        ["AC.L1-3.1.1"], Confidence.SUPPORTING,
+    ),
+    EvidenceMapping(
+        "auth_method_detail", "Granular per-user authentication method type (FIDO2, Authenticator, SMS, etc.)",
+        ["IA.L2-3.5.3"], Confidence.SUPPORTING,
+    ),
+    EvidenceMapping(
         "security_alerts", "Security alerts from the unified Microsoft Graph Security API",
         ["AU.L2-3.3.1"], Confidence.SUPPORTING,
     ),

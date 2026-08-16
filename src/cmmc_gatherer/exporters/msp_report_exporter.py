@@ -435,10 +435,6 @@ class MSPReportExporter(ExporterBase):
                 av_color = 'status-good' if ep.antivirus_status == 'Active' else 'status-bad'
                 disabled_profiles = self._disabled_firewall_profiles(ep)
                 fw_note = f" ({', '.join(disabled_profiles)} disabled)" if disabled_profiles else ""
-                # A device merged from both planes (matched by hostname — see
-                # orchestrator._merge_endpoints) carries its Intune record
-                # under metadata['intune']. Surface that here so the signal
-                # isn't lost just because it's reported once, not twice.
                 intune = (ep.metadata or {}).get('intune')
                 if intune:
                     compliant = intune.get('is_compliant')
@@ -539,11 +535,17 @@ class MSPReportExporter(ExporterBase):
         if ad_users:
             html += f"""        <div class="section" id="sec-ad-users">
             <h2>Active Directory / Identity Objects — Users</h2>
-            {self._satisfies_badge_html(['mfa_registration', 'account_identification', 'privileged_role_tracking'], present_evidence)}
+            {self._satisfies_badge_html(['mfa_registration', 'account_identification', 'privileged_role_tracking', 'auth_method_detail'], present_evidence)}
+            <p style="font-size:0.88em;color:#64748b;">
+                Auth Method Type reflects methods registered directly with Entra. For a user
+                authenticated via a federated external identity provider, this may show as empty
+                even when real MFA is enforced at that provider — it is supplementary detail, not
+                a replacement for the MFA Registered column.
+            </p>
             <table>
                 <tr>
                     <th>Name</th><th>Source</th><th>Status</th><th>Guest</th>
-                    <th>Stale</th><th>Privileged</th><th>MFA Registered</th><th>Group Memberships</th>
+                    <th>Stale</th><th>Privileged</th><th>MFA Registered</th><th>Auth Method Type</th><th>Group Memberships</th>
                 </tr>
 """
             for u in ad_users:
@@ -567,9 +569,6 @@ class MSPReportExporter(ExporterBase):
                 stale_color = 'status-bad' if stale else ('status-good' if stale is False else 'status-neutral')
                 stale_label = 'Yes' if stale else ('No' if stale is False else 'Unknown')
 
-                # Privileged: True/False is a real answer either plane produced;
-                # None means the lookup itself failed/wasn't attempted — shown
-                # as Unknown, never silently rendered as "No".
                 privileged = attrs.get('isPrivileged')
                 roles = attrs.get('privilegedRoles') or []
                 if privileged is True:
@@ -580,8 +579,6 @@ class MSPReportExporter(ExporterBase):
                 else:
                     priv_color, priv_label = 'status-neutral', 'Unknown'
 
-                # MFA is a cloud-only concept today — on-prem AD has no MFA
-                # signal, so it's N/A, not a false "No".
                 mfa = attrs.get('isMfaRegistered')
                 methods = attrs.get('mfaMethods') or []
                 if not is_cloud:
@@ -594,13 +591,31 @@ class MSPReportExporter(ExporterBase):
                 else:
                     mfa_cell = '<span class="status-neutral">Unknown</span>'
 
+                weakest_tier = attrs.get('weakestAuthMethodTier')
+                auth_details = attrs.get('authMethodDetails') or []
+                auth_lookup_failed = attrs.get('authMethodLookupFailed')
+                if not is_cloud:
+                    auth_cell = '<span class="na">N/A (on-prem)</span>'
+                elif auth_lookup_failed:
+                    auth_cell = '<span class="status-warn">Lookup failed</span>'
+                elif weakest_tier == 'strong':
+                    auth_cell = f'<span class="status-good">Strong ({", ".join(auth_details)})</span>'
+                elif weakest_tier == 'moderate':
+                    auth_cell = f'<span class="status-warn">Moderate ({", ".join(auth_details)})</span>'
+                elif weakest_tier == 'weak':
+                    auth_cell = f'<span class="status-bad">Weak ({", ".join(auth_details)})</span>'
+                elif auth_details:
+                    auth_cell = f'<span class="status-neutral">{", ".join(auth_details)}</span>'
+                else:
+                    auth_cell = '<span class="na">None registered</span>'
+
                 html += (
                     f"                <tr><td>{name}{self._asset_category_note(u, 'attributes')}</td><td>{'Entra ID' if is_cloud else 'On-Prem AD'}</td>"
                     f"<td><span class=\"{status_color}\">{status_label}</span></td>"
                     f"<td>{guest_cell}</td>"
                     f"<td><span class=\"{stale_color}\">{stale_label}</span></td>"
                     f"<td><span class=\"{priv_color}\">{priv_label}</span></td>"
-                    f"<td>{mfa_cell}</td><td>{self._group_memberships_cell(u)}</td></tr>\n"
+                    f"<td>{mfa_cell}</td><td>{auth_cell}</td><td>{self._group_memberships_cell(u)}</td></tr>\n"
                 )
             html += "            </table>\n        </div>\n"
 
@@ -677,6 +692,32 @@ class MSPReportExporter(ExporterBase):
                 )
             html += "            </table>\n        </div>\n"
 
+        intune_role_assignments = [o for o in artifacts.ad_objects if o.object_class == 'intune_role_assignment']
+        if intune_role_assignments:
+            html += f"""        <div class="section" id="sec-intune-rbac">
+            <h2>Intune Administrative Roles</h2>
+            {self._satisfies_badge_html(['intune_rbac_assignment'], present_evidence)}
+            <p style="font-size:0.92em;color:#475569;">
+                Who holds administrative access to Intune device management itself — distinct
+                from the Entra directory roles (Global Admin, etc.) shown elsewhere in this
+                report. Someone can hold no Entra admin role at all and still have full control
+                over every managed device via an Intune-specific role assignment. Assigned
+                principal count only; individual member names are not yet resolved.
+            </p>
+            <table>
+                <tr><th>Assignment Name</th><th>Role</th><th>Assigned Principal Count</th></tr>
+"""
+            for ra in intune_role_assignments:
+                attrs = ra.attributes or {}
+                count = attrs.get('assigned_principal_count', 0)
+                count_color = 'status-warn' if count > 0 else 'na'
+                html += (
+                    f"                <tr><td>{ra.distinguished_name}</td>"
+                    f"<td>{attrs.get('role_name', 'Unknown')}</td>"
+                    f"<td><span class=\"{count_color}\">{count}</span></td></tr>\n"
+                )
+            html += "            </table>\n        </div>\n"
+
         html += """        <div class="section">
             <h2>Findings &amp; Recommendations</h2>
 """
@@ -698,7 +739,7 @@ class MSPReportExporter(ExporterBase):
         if artifacts.policies:
             html += f"""        <div class="section" id="sec-policy-compliance">
             <h2>Policy Compliance</h2>
-            {self._satisfies_badge_html(['config_enforcement', 'time_sync', 'password_complexity_enforcement', 'password_reuse_enforcement', 'account_lockout_enforcement', 'storage_encryption_requirement', 'firewall_policy_requirement', 'malware_protection_requirement', 'patch_management_policy'], present_evidence)}
+            {self._satisfies_badge_html(['config_enforcement', 'time_sync', 'password_complexity_enforcement', 'password_reuse_enforcement', 'account_lockout_enforcement', 'storage_encryption_requirement', 'firewall_policy_requirement', 'malware_protection_requirement', 'patch_management_policy', 'app_protection_policy'], present_evidence)}
             <table>
                 <tr><th>Policy</th><th>Type</th><th>Status</th><th>Current Value</th></tr>
 """
@@ -801,6 +842,9 @@ class MSPReportExporter(ExporterBase):
         'high_privilege_app_permission': 'sec-enterprise-apps',
         'security_alerts': 'sec-security-events',
         'device_sanitization_events': 'sec-security-events',
+        'auth_method_detail': 'sec-ad-users',
+        'intune_rbac_assignment': 'sec-intune-rbac',
+        'app_protection_policy': 'sec-policy-compliance',
     }
 
     def _present_evidence_keys(self, artifacts: Any, onprem_eps: List, cloud_eps: List, ad_users: List) -> List[str]:
@@ -899,6 +943,15 @@ class MSPReportExporter(ExporterBase):
 
         if any(e.source == 'Intune Device Sanitization Events' for e in artifacts.security_events):
             present.append('device_sanitization_events')
+
+        if any(getattr(u, 'attributes', {}).get('weakestAuthMethodTier') is not None for u in ad_users):
+            present.append('auth_method_detail')
+
+        if any(o.object_class == 'intune_role_assignment' for o in artifacts.ad_objects):
+            present.append('intune_rbac_assignment')
+
+        if any(p.policy_type == 'Intune App Protection Policy' for p in artifacts.policies):
+            present.append('app_protection_policy')
 
         return present
 
@@ -1955,6 +2008,14 @@ class MSPReportExporter(ExporterBase):
                 'reliable time source — an NTP server, or the domain hierarchy if '
                 'domain-joined. Accurate, synchronized time stamps are required for '
                 'meaningful audit log correlation across systems (AU.L2-3.3.7).',
+            ),
+            'Intune App Protection Policy': (
+                'App Protection Policy Setting Below Baseline', 'Medium',
+                'Review the App Protection Policy in the Intune admin center. These settings '
+                'are the primary control for corporate data on personally-owned (BYOD) devices '
+                '— a device that isn\'t fully Intune-managed relies on app-level protections '
+                '(PIN requirement, backup/save-as blocking) rather than device compliance '
+                'policies to keep organizational data separated from personal use.',
             ),
         }
         for policy_type, names in failing_by_type.items():

@@ -29,6 +29,7 @@ from .collectors.cloud.cloud_event_collector import CloudSecurityEventCollector
 from .collectors.cloud.cloud_policy_collector import CloudPolicyCollector
 from .collectors.cloud.entra_identity_collector import EntraIdentityCollector
 from .collectors.cloud.service_principal_collector import ServicePrincipalCollector
+from .collectors.cloud.intune_rbac_collector import IntuneRbacCollector
 from .collectors.cloud.intune_device_collector import IntuneDeviceCollector
 from .collectors.onprem.ad_collector import ActiveDirectoryCollector
 from .collectors.onprem.endpoint_collector import EndpointCollector
@@ -282,6 +283,12 @@ class TenantOrchestrator:
         except Exception as e:
             logger.error("[%s] Service principal collector failed: %s", profile.tenant_key, e)
             errors.append(f"service_principals: {e}")
+
+        try:
+            ad_objects += IntuneRbacCollector(graph).collect()
+        except Exception as e:
+            logger.error("[%s] Intune RBAC collector failed: %s", profile.tenant_key, e)
+            errors.append(f"intune_rbac: {e}")
 
         events: List = []
         try:

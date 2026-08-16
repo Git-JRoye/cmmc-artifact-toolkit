@@ -104,6 +104,10 @@ class CloudPolicyCollector(CollectorBase):
             policies += self._collect_compliance_policies()
         except Exception as e:
             logger.error("Intune compliance policy collection failed: %s", e)
+        try:
+            policies += self._collect_app_protection_policies()
+        except Exception as e:
+            logger.error("Intune app protection policy collection failed: %s", e)
         logger.info("Cloud policy collection complete: %d record(s)", len(policies))
         return policies
 
@@ -397,6 +401,116 @@ class CloudPolicyCollector(CollectorBase):
                 description=(f"Minimum OS version requirement from '{policy_name}' "
                               f"(informational — no current baseline to compare against, so this "
                               f"is not evaluated pass/fail)"),
+                last_applied=last_modified,
+            ))
+
+        return rows
+
+    # -- app protection policies (MAM) ---------------------------------------
+
+    def _collect_app_protection_policies(self) -> List[Policy]:
+        """Intune App Protection Policies (MAM — Mobile Application
+        Management): controls over corporate DATA within managed apps,
+        independent of full device management/compliance. Directly
+        relevant to the personally-owned (BYOD) device population this
+        project already found real, at scale, in a live pilot (3 of 4
+        Tenguard devices) — a device that isn't fully Intune-managed can
+        still have its access to corporate data inside specific apps
+        (PIN requirement, backup blocked, no "save as" to personal
+        storage) controlled this way, which full device Compliance
+        Policies don't reach for a BYOD device the same way.
+
+        HONEST CONFIDENCE NOTE: androidManagedAppProtections and
+        iosManagedAppProtections are real, documented Intune Graph
+        resources, but the exact field names read below are recalled,
+        not independently verified against a live tenant — same caveat
+        class as every other new endpoint added this session. No $select
+        is used, matching the defensive pattern already established for
+        the compliance-policy collector above (full objects fetched,
+        every field read via .get() so an absent/renamed field degrades
+        to "not present" rather than crashing).
+
+        Two separate, non-polymorphic per-platform collections are used
+        (not a single base "managedAppPolicies" collection) — deliberately
+        avoiding the exact class of problem that broke the compliance-
+        policy $select earlier this session (a base/polymorphic type
+        rejecting a subtype-only property). Only Android and iOS are
+        collected; Windows Information Protection (a related but distinct,
+        older feature) is out of scope for this pass.
+        """
+        out: List[Policy] = []
+        for platform, path in (
+            ("Android", "deviceAppManagement/androidManagedAppProtections"),
+            ("iOS", "deviceAppManagement/iosManagedAppProtections"),
+        ):
+            try:
+                for p in self.graph.get_all(path):
+                    name = p.get("displayName") or p.get("id") or f"Unnamed {platform} App Protection Policy"
+                    out.extend(self._map_app_protection_policy(p, name, platform, p.get("lastModifiedDateTime")))
+            except Exception as e:
+                detail = getattr(getattr(e, "response", None), "text", None)
+                if detail:
+                    logger.error("  %s app protection policy collection failed: %s | Response: %s",
+                                 platform, e, detail[:500])
+                else:
+                    logger.error("  %s app protection policy collection failed: %s", platform, e)
+        logger.info("  Intune app protection policies parsed: %d record(s)", len(out))
+        return out
+
+    @staticmethod
+    def _map_app_protection_policy(p: dict, policy_name: str, platform: str,
+                                    last_modified: Optional[str]) -> List[Policy]:
+        """Map one app protection policy object into individual Policy
+        rows, one per setting — same per-setting granularity as compliance
+        policies above, so each requirement gets its own pass/fail
+        evaluation. Only settings actually present (not None) produce a
+        row.
+
+        Reuses ComplianceScorer._policy_passes' existing generic
+        Enabled/Disabled fallback rule — every status value set here is
+        exactly "Enabled" or "Disabled", so no new scoring logic is
+        needed for this policy type at all.
+        """
+        rows: List[Policy] = []
+        target = f"{platform} App Protection Policy: {policy_name}"
+
+        pin_required = p.get("pinRequired")
+        if pin_required is not None:
+            rows.append(Policy(
+                policy_name="AppProtectionPinRequired", policy_type="Intune App Protection Policy",
+                status="Enabled" if pin_required else "Disabled", target=target,
+                value=str(pin_required),
+                description=f"PIN/passcode requirement to access org data in managed apps ({platform})",
+                last_applied=last_modified,
+            ))
+
+        backup_blocked = p.get("dataBackupBlocked")
+        if backup_blocked is not None:
+            rows.append(Policy(
+                policy_name="AppProtectionBackupBlocked", policy_type="Intune App Protection Policy",
+                status="Enabled" if backup_blocked else "Disabled", target=target,
+                value=str(backup_blocked),
+                description=f"Org data backup to personal/unmanaged locations blocked ({platform})",
+                last_applied=last_modified,
+            ))
+
+        save_as_blocked = p.get("saveAsBlocked")
+        if save_as_blocked is not None:
+            rows.append(Policy(
+                policy_name="AppProtectionSaveAsBlocked", policy_type="Intune App Protection Policy",
+                status="Enabled" if save_as_blocked else "Disabled", target=target,
+                value=str(save_as_blocked),
+                description=f"'Save as' to personal/unmanaged storage blocked ({platform})",
+                last_applied=last_modified,
+            ))
+
+        managed_browser_required = p.get("managedBrowserToOpenLinksRequired")
+        if managed_browser_required is not None:
+            rows.append(Policy(
+                policy_name="AppProtectionManagedBrowserRequired", policy_type="Intune App Protection Policy",
+                status="Enabled" if managed_browser_required else "Disabled", target=target,
+                value=str(managed_browser_required),
+                description=f"Managed browser required to open links from managed apps ({platform})",
                 last_applied=last_modified,
             ))
 
