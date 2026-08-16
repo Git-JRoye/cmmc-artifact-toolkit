@@ -7,37 +7,60 @@ this environment," which IA.L1-3.5.1's own text explicitly covers
 devices"). A service principal is exactly that: a process acting with its
 own identity, not a human one.
 
-Deliberately scoped narrower than it could be: this collects WHICH
-applications exist and HOW MANY permission grants each holds, not WHICH
-specific permissions (e.g. "Directory.ReadWrite.All") each one has.
-Resolving a permission grant's appRoleId GUID back to a human-readable
-permission name requires a second lookup against the resource API's own
-declared app roles, which adds real complexity and risk on top of an
-already only-moderately-confident endpoint — better to ship a correct,
-narrower MVP (existence + count) than a wider one built on a shakier
-assumption. Naming the specific permissions is a reasonable next step once
-this basic shape is confirmed working against a real tenant.
+Resolves each permission grant's appRoleId GUID back to its actual
+human-readable name (e.g. "Directory.ReadWrite.All"), not just a count —
+this was originally deferred as a safer, narrower MVP (existence + count
+only) until the basic shape was confirmed working against a real tenant,
+which it now has been. Any application permission matching a small,
+explicit high-privilege watchlist (broad directory read/write, role
+management, etc.) is flagged distinctly — real AC.L2-3.1.7 (Privileged
+Functions) evidence: which processes hold elevated access, not just that
+some inventory of apps exists.
 
 HONEST CONFIDENCE NOTE: GET /servicePrincipals itself is a long-stable,
 extremely common v1.0 Graph endpoint — low risk. The per-principal
-appRoleAssignments count is real and documented but has genuine potential
-for confusion in Graph's own naming conventions around assignment
-direction (what a principal holds vs. what's been granted to others) —
-treat a strange-looking count on the real pilot as useful information to
-investigate, not necessarily a bug.
+appRoleAssignments fields used here (resourceId, appRoleId) and the
+resource service principal's own appRoles collection are real and
+commonly documented shapes, but resolving a GUID to a name through a
+second, cached lookup is a more involved chain than anything else in this
+file — treat a permission that resolves as "Unknown permission (<guid>)"
+as a real signal to check that specific resource's appRoles rather than
+an error.
 
-Graph application permission required: Application.Read.All (NEW — covers
-both the servicePrincipals list and each one's own appRoleAssignments).
+Efficiency note: resolving names naively (one appRoles fetch per grant)
+would refetch the SAME resource's role list over and over, since most
+apps reference a small handful of resources (Microsoft Graph chief among
+them) repeatedly. This collector caches each resource's role list once
+per collect() run, so the real Graph traffic stays at roughly one extra
+call per UNIQUE resource referenced tenant-wide, not one per grant.
+
+Graph application permission required: Application.Read.All (covers the
+servicePrincipals list, each one's own appRoleAssignments, and reading
+other service principals' declared appRoles for name resolution).
 """
 
 import logging
-from typing import List
+from typing import Dict, List, Optional, Tuple
 
 from ..base import CollectorBase
 from ...models.artifacts import ADObject
 from ...cloud.graph import GraphClient
 
 logger = logging.getLogger(__name__)
+
+# Application permissions considered high-privilege enough to flag as
+# their own finding when held by any service principal — not exhaustive,
+# but covers the class of broad directory read/write and role-management
+# access that AC.L2-3.1.7 (Privileged Functions) is most concerned with.
+_HIGH_PRIVILEGE_PERMISSIONS = {
+    "Directory.ReadWrite.All",
+    "RoleManagement.ReadWrite.Directory",
+    "Application.ReadWrite.All",
+    "User.ReadWrite.All",
+    "Mail.ReadWrite",
+    "Sites.FullControl.All",
+    "Group.ReadWrite.All",
+}
 
 
 class ServicePrincipalCollector(CollectorBase):
@@ -48,6 +71,10 @@ class ServicePrincipalCollector(CollectorBase):
 
     def __init__(self, graph: GraphClient):
         self.graph = graph
+        # {resource_service_principal_id: {app_role_id: permission_name}} —
+        # shared across every principal processed in one collect() call.
+        # See module docstring's "Efficiency note".
+        self._role_name_cache: Dict[str, Dict[str, str]] = {}
 
     def collect(self) -> List[ADObject]:
         out: List[ADObject] = []
@@ -57,9 +84,11 @@ class ServicePrincipalCollector(CollectorBase):
                 sp_id = sp.get("id")
                 name = sp.get("displayName") or sp.get("appId") or "Unnamed Application"
                 if sp_id:
-                    grant_count, lookup_failed = self._count_permission_grants(sp_id, name)
+                    permission_names, lookup_failed = self._resolve_permission_grants(sp_id, name)
                 else:
-                    grant_count, lookup_failed = 0, False
+                    permission_names, lookup_failed = [], False
+
+                high_privilege = sorted(set(permission_names) & _HIGH_PRIVILEGE_PERMISSIONS)
 
                 out.append(ADObject(
                     distinguished_name=name,
@@ -69,7 +98,9 @@ class ServicePrincipalCollector(CollectorBase):
                         "app_id": sp.get("appId"),
                         "account_enabled": sp.get("accountEnabled"),
                         "service_principal_type": sp.get("servicePrincipalType"),
-                        "permission_grant_count": grant_count,
+                        "permission_grant_count": len(permission_names),
+                        "permission_names": permission_names,
+                        "high_privilege_permissions": high_privilege,
                         "permission_lookup_failed": lookup_failed,
                         "source": "entra",
                     },
@@ -80,16 +111,41 @@ class ServicePrincipalCollector(CollectorBase):
         logger.info("Service principal (enterprise app) inventory complete: %d record(s)", len(out))
         return out
 
-    def _count_permission_grants(self, sp_id: str, name: str) -> tuple:
-        """Count application permission grants held by this service
-        principal. A count only — see module docstring for why this
-        deliberately doesn't resolve grants to specific permission names
-        yet. Failure here is isolated to this one principal's count;
-        never affects the rest of the inventory.
+    def _resolve_permission_grants(self, sp_id: str, name: str) -> Tuple[List[str], bool]:
+        """Return (permission_names, failed) for this service principal —
+        each application permission it holds, resolved to its real,
+        human-readable name, not just a count. Failure here is isolated to
+        this one principal; never affects the rest of the inventory.
         """
+        names: List[str] = []
         try:
-            grants = list(self.graph.get_all(f"servicePrincipals/{sp_id}/appRoleAssignments"))
-            return len(grants), False
+            for grant in self.graph.get_all(f"servicePrincipals/{sp_id}/appRoleAssignments"):
+                resource_id = grant.get("resourceId")
+                app_role_id = grant.get("appRoleId")
+                if not resource_id or not app_role_id:
+                    continue
+                role_name = self._resolve_role_name(resource_id, app_role_id)
+                names.append(role_name or f"Unknown permission ({app_role_id})")
+            return names, False
         except Exception as e:
-            logger.warning("  Could not count permission grants for '%s': %s", name, e)
-            return 0, True
+            logger.warning("  Could not resolve permission grants for '%s': %s", name, e)
+            return [], True
+
+    def _resolve_role_name(self, resource_id: str, app_role_id: str) -> Optional[str]:
+        """Resolve one appRoleId to its real permission name, fetching and
+        caching the target resource's own declared app roles once per
+        resource (not once per grant) — see module docstring's
+        "Efficiency note"."""
+        if resource_id not in self._role_name_cache:
+            try:
+                resource_sp = self.graph.get_one(
+                    f"servicePrincipals/{resource_id}", params={"$select": "id,appRoles"}
+                )
+                roles = resource_sp.get("appRoles") or []
+                self._role_name_cache[resource_id] = {
+                    r.get("id"): r.get("value") for r in roles if r.get("id")
+                }
+            except Exception as e:
+                logger.warning("  Could not resolve app roles for resource '%s': %s", resource_id, e)
+                self._role_name_cache[resource_id] = {}
+        return self._role_name_cache[resource_id].get(app_role_id)

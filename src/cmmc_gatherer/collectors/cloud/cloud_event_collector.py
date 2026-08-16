@@ -14,6 +14,11 @@ and MSP report work unchanged:
     are actually deployed (Defender for Endpoint, Defender for Office 365,
     Defender for Identity, Sentinel if connected) — real detections, not
     just configuration/audit trail.
+  - Device sanitization events (deviceManagement/auditEvents) — a record
+    of remote wipe/retire actions actually taken against Intune-managed
+    devices, real MP.L1-3.8.3 (Media Disposal) evidence. Genuinely the
+    least confident endpoint added this session — see the dedicated note
+    below.
 
 Level mapping (Critical/Error/Warning/Information) is a judgment call, same
 as the on-prem collector's reliance on Windows' own event levels — there is
@@ -64,6 +69,12 @@ least-privileged one of those four for a read-only compliance tool. If this
 still 403s after adding SecurityAlert.Read.All and granting admin consent,
 the real error message will say so explicitly — check it before assuming
 another permission is needed.
+
+deviceManagement/auditEvents (device sanitization events) is expected to
+be covered by DeviceManagementManagedDevices.Read.All (already required
+elsewhere in this project for Intune device data) — genuinely unverified,
+since this is the least confident endpoint added this session. If it
+403s, the exact required permission will be in the error text.
 """
 
 import logging
@@ -115,8 +126,83 @@ class CloudSecurityEventCollector(CollectorBase):
                 logger.error("Security alerts collection failed: %s | Response: %s", e, detail[:500])
             else:
                 logger.error("Security alerts collection failed: %s", e)
+        try:
+            events += self._collect_sanitization_events(cutoff_iso)
+        except Exception as e:
+            detail = getattr(getattr(e, "response", None), "text", None)
+            if detail:
+                logger.error("Device sanitization event collection failed: %s | Response: %s", e, detail[:500])
+            else:
+                logger.error("Device sanitization event collection failed: %s", e)
         logger.info("Cloud security event collection complete: %d event(s)", len(events))
         return events
+
+    # -- device sanitization (remote wipe/retire) events, MP.L1-3.8.3 -------
+
+    def _collect_sanitization_events(self, cutoff_iso: str) -> List[SecurityEvent]:
+        """MP.L1-3.8.3 evidence: a record of remote wipe/retire actions
+        ACTUALLY taken, via Intune's own device-management audit log — not
+        just that the capability exists (every Intune-managed device has
+        it inherently, which is weak evidence on its own), but whether
+        sanitization has actually been exercised, which is what the
+        practice's assessment objective ("system media... is sanitized or
+        destroyed") really asks for.
+
+        HONEST CONFIDENCE NOTE: this is genuinely the least certain new
+        endpoint added this session. deviceManagement/auditEvents is
+        recalled with only moderate confidence as a real Graph resource,
+        and the precise field/enum names Intune uses for wipe/retire
+        activities are NOT confidently known. Deliberately does NOT risk a
+        server-side $filter on an uncertain activity-type enum value (the
+        same mistake that broke the compliance-policy $select earlier this
+        session) — instead fetches broadly (date-filtered only) and
+        matches client-side against a keyword list, checking multiple
+        plausible field names defensively. If this returns nothing or
+        errors, that is genuinely uninformative either way until checked
+        against the real response body.
+        """
+        out: List[SecurityEvent] = []
+        params = {"$filter": f"activityDateTime ge {cutoff_iso}", "$top": "999"}
+        keywords = ("wipe", "retire", "sanitiz")
+        for record in self.graph.get_all("deviceManagement/auditEvents", params=params):
+            haystack = " ".join(str(record.get(f) or "") for f in
+                                 ("activityType", "activity", "componentName", "activityOperationType")).lower()
+            if not any(k in haystack for k in keywords):
+                continue
+            out.append(self._map_sanitization_event(record))
+            if len(out) >= self.max_events:
+                logger.warning("  Sanitization event cap (%d) reached — more may exist "
+                                "in the lookback window than were collected", self.max_events)
+                break
+        logger.info("  Device sanitization events: %d", len(out))
+        return out
+
+    @staticmethod
+    def _map_sanitization_event(record: dict) -> SecurityEvent:
+        actor = record.get("actor") or {}
+        actor_name = actor.get("userPrincipalName") or actor.get("applicationDisplayName") or "unknown"
+        activity = record.get("activity") or record.get("activityType") or "Device sanitization action"
+        resources = record.get("resources") or []
+        resource_names = [r.get("displayName") for r in resources if r.get("displayName")]
+
+        message = f"{activity} by {actor_name}"
+        if resource_names:
+            message += f" on: {', '.join(resource_names)}"
+
+        return SecurityEvent(
+            event_id=0,
+            source="Intune Device Sanitization Events",
+            timestamp=record.get("activityDateTime") or "",
+            message=message,
+            level="Information",
+            computer="; ".join(resource_names) or "N/A",
+            user=actor_name,
+            event_data={
+                "graph_id": record.get("id"),
+                "activity_type": record.get("activityType"),
+                "activity_result": record.get("activityResult"),
+            },
+        )
 
     # -- sign-in logs ---------------------------------------------------------
 

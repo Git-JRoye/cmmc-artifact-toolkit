@@ -109,7 +109,8 @@ logger = logging.getLogger(__name__)
 # a cloud-sourced policy/event record is never mistaken for an on-prem one
 # (or vice versa) in either place.
 _CLOUD_POLICY_TYPES = ('Conditional Access', 'Intune Configuration Profile')
-_CLOUD_EVENT_SOURCES = ('Entra Sign-In Logs', 'Entra Directory Audit Logs', 'Microsoft Graph Security Alerts')
+_CLOUD_EVENT_SOURCES = ('Entra Sign-In Logs', 'Entra Directory Audit Logs', 'Microsoft Graph Security Alerts',
+                        'Intune Device Sanitization Events')
 
 # Shared stylesheet for both the main report and the standalone software
 # inventory page, so a visual change (or the "make it look more
@@ -622,27 +623,38 @@ class MSPReportExporter(ExporterBase):
         if service_principals:
             html += f"""        <div class="section" id="sec-enterprise-apps">
             <h2>Enterprise Applications</h2>
-            {self._satisfies_badge_html(['enterprise_app_inventory'], present_evidence)}
+            {self._satisfies_badge_html(['enterprise_app_inventory', 'high_privilege_app_permission'], present_evidence)}
             <p style="font-size:0.92em;color:#475569;">
                 Every application/service principal registered in this tenant — processes acting
-                with their own identity, not human users. Permission grant count only; specific
-                permission names are not yet resolved (see the collector's own notes).
+                with their own identity, not human users. Expand a device's permission list to see
+                the actual resolved permission names it holds; any high-privilege permission is
+                flagged separately below and in Findings.
             </p>
             <table>
-                <tr><th>Name</th><th>App ID</th><th>Enabled</th><th>Type</th><th>Permission Grants</th></tr>
+                <tr><th>Name</th><th>App ID</th><th>Enabled</th><th>Type</th><th>Permissions</th></tr>
 """
             for sp in service_principals:
                 attrs = sp.attributes or {}
                 enabled = attrs.get('account_enabled')
                 enabled_color = 'status-good' if enabled else 'status-warn'
                 grant_failed = attrs.get('permission_lookup_failed')
-                grant_count = attrs.get('permission_grant_count')
+                permission_names = attrs.get('permission_names') or []
+                high_priv = attrs.get('high_privilege_permissions') or []
                 if grant_failed:
                     grant_cell = '<span class="status-warn">Lookup failed</span>'
-                elif grant_count is not None:
-                    grant_cell = str(grant_count)
+                elif permission_names:
+                    items = "".join(
+                        f"<li>{p}{' <span class=\"badge supporting\">HIGH PRIVILEGE</span>' if p in high_priv else ''}</li>"
+                        for p in sorted(permission_names)
+                    )
+                    grant_cell = (
+                        f'<details><summary>{len(permission_names)} permission(s)'
+                        f'{" — includes high-privilege" if high_priv else ""}</summary>'
+                        f'<ul style="margin:6px 0 0 18px;font-size:0.85em;max-height:150px;'
+                        f'overflow-y:auto;">{items}</ul></details>'
+                    )
                 else:
-                    grant_cell = '<span class="na">Not checked</span>'
+                    grant_cell = '<span class="na">None</span>'
                 html += (
                     f"                <tr><td>{sp.distinguished_name}</td>"
                     f"<td style=\"font-size:0.85em;color:#64748b;\">{attrs.get('app_id', 'Unknown')}</td>"
@@ -772,7 +784,9 @@ class MSPReportExporter(ExporterBase):
         'privileged_role_tracking': 'sec-ad-users',
         'guest_group_membership': 'sec-ad-groups',
         'enterprise_app_inventory': 'sec-enterprise-apps',
+        'high_privilege_app_permission': 'sec-enterprise-apps',
         'security_alerts': 'sec-security-events',
+        'device_sanitization_events': 'sec-security-events',
     }
 
     def _present_evidence_keys(self, artifacts: Any, onprem_eps: List, cloud_eps: List, ad_users: List) -> List[str]:
@@ -860,8 +874,15 @@ class MSPReportExporter(ExporterBase):
         if any(o.object_class == 'service_principal' for o in artifacts.ad_objects):
             present.append('enterprise_app_inventory')
 
+        if any((o.attributes or {}).get('high_privilege_permissions') for o in artifacts.ad_objects
+               if o.object_class == 'service_principal'):
+            present.append('high_privilege_app_permission')
+
         if any(e.source == 'Microsoft Graph Security Alerts' for e in artifacts.security_events):
             present.append('security_alerts')
+
+        if any(e.source == 'Intune Device Sanitization Events' for e in artifacts.security_events):
+            present.append('device_sanitization_events')
 
         return present
 
@@ -1457,7 +1478,7 @@ class MSPReportExporter(ExporterBase):
             disclosure_bits.append(f"all {len(severe)} Critical/Error event(s) shown")
         disclosure_bits.append(f"{len(shown_info)} of {len(informational)} Information-level event(s) shown as a sample")
 
-        badge = self._satisfies_badge_html(['audit_log_collection', 'audit_user_traceability', 'security_alerts'], present_evidence)
+        badge = self._satisfies_badge_html(['audit_log_collection', 'audit_user_traceability', 'security_alerts', 'device_sanitization_events'], present_evidence)
         html = f"""        <div class="section" id="sec-security-events">
             <h2>Security Events</h2>
             {badge}
@@ -1729,6 +1750,31 @@ class MSPReportExporter(ExporterBase):
                 'recommendation': 'Review whether these privileged accounts are still needed. If not, '
                                    'disable or remove them. If needed but inactive, confirm the account '
                                    'is not orphaned from a departed employee or unused service account.',
+            })
+
+        # Enterprise applications (service principals) holding a
+        # high-privilege permission -- a process with broad directory
+        # read/write or role-management access is exactly the kind of
+        # "privileged function" AC.L2-3.1.7 is concerned with, distinct
+        # from human privileged accounts already checked above.
+        high_priv_apps = [
+            (o.distinguished_name, (o.attributes or {}).get('high_privilege_permissions') or [])
+            for o in artifacts.ad_objects
+            if o.object_class == 'service_principal' and (o.attributes or {}).get('high_privilege_permissions')
+        ]
+        if high_priv_apps:
+            detail = "; ".join(f"{name} ({', '.join(perms)})" for name, perms in high_priv_apps)
+            findings.append({
+                'title': 'Enterprise Application Holds High-Privilege Permission',
+                'severity': 'Medium',
+                'description': f'The following applications hold a high-privilege application '
+                                f'permission: {detail}',
+                'recommendation': 'Confirm each of these applications genuinely needs this level of '
+                                   'access. Broad directory read/write or role-management permissions '
+                                   'granted to an application are a real privileged-function risk '
+                                   '(AC.L2-3.1.7) — review whether a narrower, least-privilege '
+                                   'permission would work instead, especially for any app that is no '
+                                   'longer actively used.',
             })
 
         # Cloud-native finding, using the real Intune compliance signal instead

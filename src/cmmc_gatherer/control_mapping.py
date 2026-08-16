@@ -72,6 +72,7 @@ DOMAIN_NAMES: Dict[str, str] = {
     "AU": "Audit and Accountability",
     "CM": "Configuration Management",
     "IA": "Identification and Authentication",
+    "MP": "Media Protection",
     "SC": "System and Communications Protection",
     "SI": "System and Information Integrity",
 }
@@ -80,7 +81,7 @@ DOMAIN_NAMES: Dict[str, str] = {
 # DOMAIN_NAMES above) the day a new domain's evidence actually gets added —
 # until then, a domain with zero mapped evidence simply never renders, so
 # there's no harm in this list being ahead of what's collected today.
-DOMAIN_ORDER: List[str] = ["AC", "AU", "CM", "IA", "SC", "SI"]
+DOMAIN_ORDER: List[str] = ["AC", "AU", "CM", "IA", "MP", "SC", "SI"]
 
 PRACTICES: Dict[str, Practice] = {
     "IA.L2-3.5.3": Practice(
@@ -177,6 +178,11 @@ PRACTICES: Dict[str, Practice] = {
         "Establish and manage cryptographic keys for cryptography employed "
         "in organizational systems.",
     ),
+    "MP.L1-3.8.3": Practice(
+        "MP.L1-3.8.3", "MP", 1, "Media Disposal",
+        "Sanitize or destroy information system media containing Federal "
+        "Contract Information before disposal or release for reuse.",
+    ),
 }
 
 EVIDENCE_MAP: List[EvidenceMapping] = [
@@ -237,8 +243,16 @@ EVIDENCE_MAP: List[EvidenceMapping] = [
         ["IA.L1-3.5.1"], Confidence.SUPPORTING,
     ),
     EvidenceMapping(
+        "high_privilege_app_permission", "Service principal holding a high-privilege application permission",
+        ["AC.L2-3.1.7"], Confidence.SUPPORTING,
+    ),
+    EvidenceMapping(
         "security_alerts", "Security alerts from the unified Microsoft Graph Security API",
         ["AU.L2-3.3.1"], Confidence.SUPPORTING,
+    ),
+    EvidenceMapping(
+        "device_sanitization_events", "Record of remote wipe/retire actions actually taken (Intune device-management audit log)",
+        ["MP.L1-3.8.3"], Confidence.DIRECT,
     ),
     EvidenceMapping(
         "audit_log_collection", "Security event and audit log collection (on-prem Event Log + Entra sign-in/audit logs)",
