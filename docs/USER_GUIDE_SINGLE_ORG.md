@@ -114,11 +114,14 @@ permissions, then **Grant admin consent**:
 | `User.Read.All` | Entra user inventory |
 | `Group.Read.All` | Entra group inventory |
 | `AuditLog.Read.All` | MFA registration status, sign-in/audit logs, stale-account detection |
-| `DeviceManagementManagedDevices.Read.All` | Intune device inventory, installed software |
+| `DeviceManagementManagedDevices.Read.All` | Intune device inventory, installed software, real-time Defender health |
 | `RoleManagement.Read.Directory` | Privileged role membership |
 | `Reports.Read.All` | MFA registration report |
 | `Policy.Read.All` | Conditional Access policies |
-| `DeviceManagementConfiguration.Read.All` | Intune configuration profiles |
+| `DeviceManagementConfiguration.Read.All` | Intune configuration profiles, compliance policies, Windows Update Ring settings |
+| `BitlockerKey.ReadBasic.All` | BitLocker recovery key escrow status (existence check only — this tool never reads the key value itself; deliberately not `BitlockerKey.Read.All`) |
+| `Application.Read.All` | Enterprise application / service principal inventory |
+| `SecurityAlert.Read.All` | Security alerts from the unified Microsoft Graph Security API (Defender, Sentinel if connected) |
 
 Generate a client secret (Certificates & secrets → New client secret) and
 set it as an environment variable matching whatever `secret_ref` you put
@@ -148,13 +151,14 @@ Or, since you only have one tenant anyway:
 python run_assessment.py --all
 ```
 
-Output: `report_mycompany.html` (the main report) and
-`report_mycompany_software.html` (the full installed-software list,
-linked from the main report).
+Output: `report_mycompany.html` (the main report), `report_mycompany_software.html`
+(the full installed-software list), and `report_mycompany_health.html` (every
+warning/error any collector logged during the run — always written, even when
+completely clean) — all linked from the main report.
 
 Check the console output for any errors — collection failures for one
 plane don't stop the other from running, but you'll want to know about
-them.
+them. The health page is the same information, permanently saved with the report.
 
 ---
 
@@ -163,6 +167,13 @@ them.
 - **Executive Summary** — customer, assessment ID/date, collection mode
   (on-prem/cloud/hybrid — reflects what was actually collected, not just
   configured), overall score, and scoring coverage.
+- **Collection Health** (always shown, right after Executive Summary) —
+  a warning/error count from this run with a link to the full
+  `_health.html` page, or a plain "No collection issues this run" if
+  clean. This is the same information previously visible only in the
+  PowerShell console, now permanently saved with the report. A warning
+  here means some evidence may be incomplete — it does not by itself mean
+  your environment has a security problem.
 - **Compliance Score** — the headline number. If coverage is incomplete
   (e.g. a cloud-only tenant has no firewall/antivirus data — that's not
   collectible from Intune the same way it is on-prem), a red banner says
@@ -178,11 +189,39 @@ them.
   report provides real evidence for, each linked to the section that
   proves it. Every badge is tagged DIRECT (textbook match) or SUPPORTING
   (real but partial evidence) — never overstated.
-- **Infrastructure Overview / device tables / AD tables / Findings /
-  Policy Compliance / Security Events** — the actual evidence, with every
-  finding citing the specific control it relates to where applicable.
+- **On-Prem Endpoint Status / Cloud-Managed Devices (Intune)** — device
+  tables. The cloud table now includes: BitLocker recovery key escrow
+  status (existence check only — never the key itself), real-time
+  Windows Defender health (distinct from, and more current than, the
+  compliance-policy *requirement* check below), and device Ownership
+  (Corporate vs. Personal/BYOD) — which is also the real, structural
+  reason a device's software inventory may show "None detected": Intune
+  deliberately restricts app-inventory collection on personally-owned
+  devices for user privacy.
+- **Active Directory / Identity Objects — Users / Groups** — on-prem AD
+  and Entra users/groups, including per-user group membership.
+- **Enterprise Applications** — every application/service principal
+  registered in the tenant (processes acting on their own identity, not
+  human users), with a permission-grant *count* per app. Specific
+  permission names aren't resolved yet (see §7).
+- **Findings & Recommendations** — every finding cites the specific CMMC
+  practice it relates to where applicable.
+- **Policy Compliance** — on-prem Local Security Policy/UAC/audit policy,
+  Entra Conditional Access, and Intune configuration profiles,
+  compliance policies (password/encryption/firewall/Defender
+  *requirements*), and Windows Update Ring (patch deferral, automatic
+  install). On-prem and cloud evidence for the *same* real-world setting
+  (e.g. minimum password length) appear together in this one table,
+  scored by the identical rule regardless of source.
 - **Installed Software Inventory** — summarized here with a link to the
-  full, separate page (`report_mycompany_software.html`).
+  full, separate page (`report_mycompany_software.html`), including a
+  disclosure of exactly which devices aren't contributing and why
+  (collection failed / confirmed empty — including the BYOD-specific
+  reason / not attempted).
+- **Security Events** — on-prem Windows event log data (if collected)
+  plus Entra sign-in logs, directory audit logs, and security alerts from
+  the unified Microsoft Graph Security API (surfacing whatever security
+  product is actually deployed — Defender, Sentinel if connected).
 
 ---
 
@@ -261,13 +300,34 @@ defend — this tool only ever applies exactly what you declare.
   a single machine (your own), this is fine as-is.
 - **Patch scoring only checks presence of hotfix history**, not recency
   against a current baseline.
-- **Intune per-setting policy visibility** (password complexity, lockout
-  threshold configured via Intune Settings Catalog) isn't built yet — only
-  on-prem Local Security Policy currently gets this level of detail.
-- **Vulnerability scanning is not integrated.**
+- **On-prem AD collector has never been run against a real domain
+  controller** — only in demo mode. If you're assessing on-prem AD, treat
+  this as unverified until you've confirmed it works against your own DC.
+- **Device merge logic** (combining an on-prem scan and an Intune record
+  of the same physical machine into one report entry) is implemented and
+  unit-tested, but not yet proven on a real hybrid client running as a
+  single profile — see `USER_GUIDE_MSP.md` for the hybrid config that
+  would actually exercise it.
+- **Enterprise Applications shows a permission-grant *count* per app, not
+  the specific permission names** — resolving those requires an
+  additional lookup this tool doesn't do yet.
+- **Vulnerability scanning is not integrated**, and there's no per-device
+  firewall/antivirus *state* for cloud-only devices (only the compliance-
+  policy *requirement* and real-time Defender health) — a fuller
+  Defender for Endpoint integration is a real, deferred next step.
+- **Remote wipe / device sanitization evidence (Media Protection domain)
+  is not collected** — real CMMC relevance (`MP.L1-3.8.3`), not yet built.
+- **Exchange Online mailbox security settings** (audit logging, external
+  forwarding rules, DKIM/DMARC) are not collected — this needs a separate
+  connection mechanism from the Graph client everything else uses, and is
+  a deliberately separate future project, not a quick add.
+- **GDAP is not implemented** — every cloud tenant needs its own app
+  registration (or the shared multi-tenant-app pattern in
+  `USER_GUIDE_MSP.md`), not Microsoft's formal MSP delegated-access model.
 
 ---
 
-*Last updated: covers everything through the CMMC asset-scope feature.
-Add to this section as new features land — don't let this drift from
-what the tool actually does.*
+*Last updated: covers everything through Collection Health, enterprise
+app inventory, security alerts, real-time Defender health, BitLocker
+escrow, and device ownership type. Add to this section as new features
+land — don't let this drift from what the tool actually does.*

@@ -196,25 +196,31 @@ automated heuristic decides on your behalf.
 
 ## 5. A note on report file naming at scale
 
-Every client produces its own, separately named pair of files:
+Every client produces its own, separately named set of three files:
 
 ```
-report_acme.html          report_acme_software.html
-report_globex.html        report_globex_software.html
-report_initech.html       report_initech_software.html
+report_acme.html          report_acme_software.html          report_acme_health.html
+report_globex.html        report_globex_software.html        report_globex_health.html
+report_initech.html       report_initech_software.html       report_initech_health.html
 ```
 
-Running `--all` across N clients produces 2N files, all clearly
+Running `--all` across N clients produces 3N files, all clearly
 distinguishable by the `tenant_key` in the filename, and each report's own
 header/title also states the client's `display_name` — so there's never
 ambiguity about which report belongs to which client, even with a large
-client book.
+client book. The `_health.html` file is worth checking across your whole
+book after a batch run — it's the fastest way to spot which clients (if
+any) hit a real collection error versus a clean run, without opening
+every main report.
 
 ---
 
 ## 6. Known limitations (as of this writing)
 
-Everything in `USER_GUIDE_SINGLE_ORG.md` §7 applies here too. Additionally,
+Everything in `USER_GUIDE_SINGLE_ORG.md` §7 applies here too — including
+enterprise app permission names not yet resolved (count only), no
+Exchange Online mailbox evidence, no remote wipe/Media Protection
+evidence, and no fuller Defender for Endpoint integration. Additionally,
 at MSP scale specifically:
 
 - **On-prem fleet collection is unbuilt** — see §3. This is the single
@@ -227,9 +233,15 @@ at MSP scale specifically:
   unit-tested, but has not yet been proven against a real, single-profile
   hybrid client in production — only against separate on-prem/cloud
   profiles in the pilot so far.
+- **Device Ownership (Corporate vs. Personal/BYOD)** is read via its own
+  isolated per-device Graph call — if it fails for a given device
+  (permission gap, tenant quirk), that one device shows "Unknown"
+  ownership and everything else about it is unaffected; check that
+  client's `_health.html` if you see this happening across a whole book.
 
 ---
 
-*Last updated: covers everything through the CMMC asset-scope feature.
-Add to this section as new features land — don't let this drift from
-what the tool actually does.*
+*Last updated: covers everything through Collection Health, enterprise
+app inventory, security alerts, real-time Defender health, BitLocker
+escrow, and device ownership type. Add to this section as new features
+land — don't let this drift from what the tool actually does.*

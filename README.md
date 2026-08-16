@@ -18,16 +18,23 @@ This project is under active restructuring. Be precise about what's real:
 Component	Status
 On-prem endpoint collector (OS, patches, Defender, firewall, installed software)	✅ Real — PowerShell-backed, live data
 Entra ID identity collector (users, groups, guests, stale accounts, MFA, privileged roles, group membership)	✅ Real — Microsoft Graph
-Intune device collector (compliance, encryption, management state, installed software)	✅ Real — Microsoft Graph
+Enterprise application / service principal inventory	✅ Real — Microsoft Graph; shows a permission-grant count per app, specific permission names not yet resolved
+Intune device collector (compliance, encryption, management state, installed software, real-time Defender health, BitLocker recovery key escrow, device ownership)	✅ Real — Microsoft Graph
+Cloud security events (Entra sign-in/directory audit logs, unified Graph Security API alerts)	✅ Real — Microsoft Graph
+Cloud policy collector (Conditional Access, Intune configuration profiles, Intune compliance policies, Windows Update Ring)	✅ Real — Microsoft Graph; on-prem and cloud evidence for the same setting (e.g. minimum password length) are scored by one identical rule
 Per-tenant orchestrator (runs the right plane per client)	✅ Real
 National-cloud support (commercial / GCC / GCC High / DoD)	✅ Real for app-registration auth; GDAP and interactive auth are unimplemented seams
-On-prem AD, event log, and policy collectors (incl. time synchronization)	✅ Real — LDAP (AD) and PowerShell-backed (event log, policy)
+On-prem AD, event log, and policy collectors (incl. time synchronization)	✅ Real — LDAP (AD) and PowerShell-backed (event log, policy); AD collector not yet run against a real domain controller
 Compliance scoring	✅ Real — six-dimension weighted scorer, with the full weight/score/coverage breakdown shown in the report, not just a final number
-CMMC/NIST 800-171 practice mapping	✅ Real — evidence is mapped to specific practice IDs (e.g. IA.L2-3.5.3, AU.L2-3.3.7), tagged DIRECT or SUPPORTING confidence, shown in a domain-grouped navigation section
+CMMC/NIST 800-171 practice mapping	✅ Real — evidence is mapped to specific practice IDs (e.g. IA.L2-3.5.3, AU.L2-3.3.7, SC.L2-3.13.10), tagged DIRECT or SUPPORTING confidence, shown in a domain-grouped navigation section
 CMMC asset scope (CUI Asset / SPA / CRMA / Specialized / Out-of-Scope)	✅ Real — per-tenant config, defaults to "everything in scope," excludes/documents assets per the CMMC Assessment Guide's categorization
+Collection Health reporting	✅ Real — every collector warning/error is captured and shown in the report itself (always-present page + summary), not only the console
 SSP / POA&M generation	❌ Not started
+Exchange Online mailbox evidence (audit logging, forwarding, DKIM/DMARC)	❌ Not started — needs a separate connection mechanism from Graph
+Remote/fleet-wide on-prem collection	❌ Not started — currently only runs locally on the machine executing the script
+Remote wipe / device sanitization evidence (Media Protection domain)	❌ Not started
 
-Do not use this to make a real compliance claim without a qualified reviewer. See docs/GETTING_STARTED.md for installation, and CMMC-TOOL-BUILD-PLAN.md for the phased roadmap.
+Do not use this to make a real compliance claim without a qualified reviewer. See `docs/GETTING_STARTED.md` for installation, and `CMMC-TOOL-BUILD-PLAN.md` for the phased roadmap.
 
 Architecture
 
@@ -43,11 +50,17 @@ src/cmmc_gatherer/
 │   │   └── policy_collector.py
 │   └── cloud/                     # Entra ID / Intune plane
 │       ├── entra_identity_collector.py
-│       └── intune_device_collector.py
+│       ├── service_principal_collector.py   # enterprise app / service principal inventory
+│       ├── intune_device_collector.py       # + BitLocker escrow, real-time Defender health, ownership
+│       ├── cloud_event_collector.py         # sign-in/audit logs + Graph Security API alerts
+│       └── cloud_policy_collector.py        # Conditional Access, Intune config/compliance policies, Update Ring
 ├── cloud/
 │   ├── cloud_config.py            # national-cloud registry + TenantProfile
 │   └── graph.py                   # Graph auth providers + paged client
 ├── models/artifacts.py            # shared artifact types (Endpoint, ADObject, ...)
+├── asset_scope.py                 # CMMC asset categorization (CUI Asset/SPA/CRMA/Specialized/Out-of-Scope)
+├── collection_health.py           # captures collector warnings/errors into the report itself
+├── control_mapping.py             # evidence -> CMMC practice registry (DIRECT/SUPPORTING confidence)
 ├── utils/                         # scoring, PII filtering, multi-tenant management
 ├── exporters/                     # JSON / CSV / XML / HTML / MSP report
 ├── orchestrator.py                # per-tenant: picks plane(s), runs collectors

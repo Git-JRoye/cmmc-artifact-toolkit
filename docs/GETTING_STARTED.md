@@ -134,6 +134,7 @@ for exactly what to fill in and how to run your first real assessment.
 
 ---
 
-*Last updated: covers the installation flow as of the CMMC asset-scope
-feature. If a step here stops matching what actually happens, fix this
-doc, not just the tool.*
+*Last updated: install flow unchanged since this doc was created — still
+accurate as of the ownership-type/Collection Health features. If a step
+here stops matching what actually happens, fix this doc, not just the
+tool.*
