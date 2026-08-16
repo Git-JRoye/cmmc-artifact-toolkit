@@ -467,7 +467,7 @@ class MSPReportExporter(ExporterBase):
                 <tr>
                     <th>Hostname</th><th>OS Version</th><th>Compliance State</th>
                     <th>Encrypted</th><th>Recovery Key Escrowed</th><th>Real-Time Protection</th>
-                    <th>Management State</th><th>Owner</th>
+                    <th>Management State</th><th>Ownership</th><th>Owner</th>
                     <th>Installed Software</th>
                 </tr>
 """
@@ -500,6 +500,14 @@ class MSPReportExporter(ExporterBase):
                 else:
                     rtp_cell = '<span class="na">Not checked</span>'
 
+                owner_type = (meta.get('owner_type') or '').lower()
+                if owner_type == 'personal':
+                    ownership_cell = '<span class="status-neutral">Personal (BYOD)</span>'
+                elif owner_type == 'company':
+                    ownership_cell = 'Corporate'
+                else:
+                    ownership_cell = '<span class="na">Unknown</span>'
+
                 html += (
                     f"                <tr><td>{ep.hostname}{self._asset_category_note(ep)}</td><td>{ep.os_version}</td>"
                     f"<td><span class=\"{comp_color}\">{meta.get('compliance_state', 'Unknown')}</span></td>"
@@ -507,6 +515,7 @@ class MSPReportExporter(ExporterBase):
                     f"<td>{escrow_cell}</td>"
                     f"<td>{rtp_cell}</td>"
                     f"<td>{meta.get('management_state', 'Unknown')}</td>"
+                    f"<td>{ownership_cell}</td>"
                     f"<td>{meta.get('owner_upn', 'Unknown')}</td>"
                     f"<td>{self._software_cell(ep, software_href)}</td></tr>\n"
                 )
@@ -1222,16 +1231,30 @@ class MSPReportExporter(ExporterBase):
         the standalone software-inventory page, so the two can never
         disagree about counts or which devices are missing and why.
 
-        Returns (grouped, by_status):
+        Returns (grouped, by_status, owner_type_by_hostname):
           grouped   — {(name, version, publisher): [hostnames]}, deduplicated
           by_status — {status: [hostnames]} for every non-'ok' endpoint,
                       grouped by _software_status
+          owner_type_by_hostname — {hostname: 'company'/'personal'/None},
+                      used to give a specific, real explanation (rather
+                      than a generic one) when a device's software
+                      inventory is confirmed empty because it's a
+                      personally-owned (BYOD) device — Intune deliberately
+                      restricts app-inventory collection there for user
+                      privacy, confirmed against a real tenant where the
+                      one Corporate-owned device had real data and three
+                      Personal-owned devices all showed a genuine (not
+                      failed) empty inventory.
         """
         grouped: Dict[tuple, List[str]] = {}
+        owner_type_by_hostname: Dict[str, str] = {}
         for ep in artifacts.endpoints:
             for s in self._software_list(ep):
                 key = (s.get('name', 'Unknown'), s.get('version') or '', s.get('publisher') or '')
                 grouped.setdefault(key, []).append(ep.hostname)
+            owner_type = (ep.metadata or {}).get('owner_type')
+            if owner_type:
+                owner_type_by_hostname[ep.hostname] = owner_type.lower()
 
         by_status: Dict[str, List[str]] = {}
         for ep in artifacts.endpoints:
@@ -1239,14 +1262,25 @@ class MSPReportExporter(ExporterBase):
             if status != 'ok':
                 by_status.setdefault(status, []).append(ep.hostname)
 
-        return grouped, by_status
+        return grouped, by_status, owner_type_by_hostname
 
     @staticmethod
-    def _software_status_notes_html(by_status: Dict[str, List[str]]) -> str:
+    def _software_status_notes_html(by_status: Dict[str, List[str]],
+                                     owner_type_by_hostname: Optional[Dict[str, str]] = None) -> str:
         """Explain any device NOT contributing to the software inventory,
         grouped by why — so a client/assessor (or you, six months from now)
         doesn't have to guess whether "only one device shows software" is a
-        bug or a real device state."""
+        bug or a real device state.
+
+        The 'empty_confirmed' bucket is split by device ownership: a
+        personally-owned (BYOD) device showing a confirmed-empty inventory
+        has a specific, real, structural explanation (Intune's own privacy
+        restriction on app-inventory collection for personal devices) —
+        distinct from a company-owned device that simply hasn't completed
+        its inventory sync yet. Giving the real reason instead of a generic
+        one for BYOD devices avoids implying there's a fix to chase.
+        """
+        owner_type_by_hostname = owner_type_by_hostname or {}
         status_notes = []
         if by_status.get('failed'):
             status_notes.append(
@@ -1255,12 +1289,24 @@ class MSPReportExporter(ExporterBase):
                 f"collection console log for the specific error.</li>"
             )
         if by_status.get('empty_confirmed'):
-            status_notes.append(
-                f"<li><strong>Confirmed empty</strong> for: {', '.join(sorted(by_status['empty_confirmed']))}. "
-                f"Collection succeeded, but no software was inventoried — for Intune-managed devices this "
-                f"commonly means the device hasn't completed an app-inventory sync yet, which is a real "
-                f"device state, not a collection error.</li>"
-            )
+            empty_hosts = by_status['empty_confirmed']
+            personal_hosts = sorted(h for h in empty_hosts if owner_type_by_hostname.get(h) == 'personal')
+            other_hosts = sorted(h for h in empty_hosts if owner_type_by_hostname.get(h) != 'personal')
+            if personal_hosts:
+                status_notes.append(
+                    f"<li><strong>Confirmed empty (personally-owned/BYOD)</strong> for: "
+                    f"{', '.join(personal_hosts)}. Intune deliberately restricts app-inventory "
+                    f"collection on personally-owned devices to protect user privacy, generally "
+                    f"limiting it to company-deployed apps only — this is expected BYOD behavior, "
+                    f"not a collection gap or something to fix.</li>"
+                )
+            if other_hosts:
+                status_notes.append(
+                    f"<li><strong>Confirmed empty</strong> for: {', '.join(other_hosts)}. "
+                    f"Collection succeeded, but no software was inventoried — for Intune-managed devices this "
+                    f"commonly means the device hasn't completed an app-inventory sync yet, which is a real "
+                    f"device state, not a collection error.</li>"
+                )
         if by_status.get('not_attempted'):
             status_notes.append(
                 f"<li><strong>Not attempted</strong> for: {', '.join(sorted(by_status['not_attempted']))}.</li>"
@@ -1297,12 +1343,12 @@ class MSPReportExporter(ExporterBase):
         if 'installed_software' not in present_evidence:
             return ""
 
-        grouped, by_status = self._software_inventory_data(artifacts)
+        grouped, by_status, owner_type_by_hostname = self._software_inventory_data(artifacts)
         if not grouped:
             return ""
 
         badge = self._satisfies_badge_html(['installed_software'], present_evidence)
-        notes_html = self._software_status_notes_html(by_status)
+        notes_html = self._software_status_notes_html(by_status, owner_type_by_hostname)
         href = software_href or "software_inventory.html"
         return f"""        <div class="section" id="sec-software-inventory">
             <h2>Installed Software Inventory</h2>
@@ -1319,9 +1365,9 @@ class MSPReportExporter(ExporterBase):
         self-contained HTML document (same shared stylesheet as the main
         report) so it can be regenerated and updated independently without
         touching the main compliance report at all."""
-        grouped, by_status = self._software_inventory_data(artifacts)
+        grouped, by_status, owner_type_by_hostname = self._software_inventory_data(artifacts)
         rows_html = self._software_table_rows_html(grouped)
-        notes_html = self._software_status_notes_html(by_status)
+        notes_html = self._software_status_notes_html(by_status, owner_type_by_hostname)
         customer_name = customer_name or "Unnamed Customer"
         assessment_id = assessment_id or "CMMC-" + datetime.now().strftime("%Y%m%d%H%M%S")
 
