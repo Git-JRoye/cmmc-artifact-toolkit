@@ -446,15 +446,17 @@ class MSPReportExporter(ExporterBase):
 """
 
         # ── Device Protection Status (combined on-prem + cloud) ─────────
-        all_eps = list(onprem_eps) + list(cloud_eps)
+        # Tag each endpoint with its plane from the list it actually came
+        # from (the same split _onprem_endpoints/_cloud_endpoints already
+        # use), rather than re-guessing cloud-ness from metadata shape.
+        all_eps = [(ep, False) for ep in onprem_eps] + [(ep, True) for ep in cloud_eps]
         if all_eps:
             fw_ok = 0
             mde_ok = 0
             rtp_ok = 0
             device_rows = ""
-            for ep in all_eps:
+            for ep, is_cloud in all_eps:
                 meta = ep.metadata or {}
-                is_cloud = bool(meta.get('source') == 'intune' or meta.get('cloud_firewall_status') is not None or meta.get('management_state'))
 
                 # Firewall
                 if is_cloud:
@@ -466,8 +468,10 @@ class MSPReportExporter(ExporterBase):
                         fw_cell = '<span class="status-bad">Disabled</span>'
                     elif cfw:
                         fw_cell = f'<span class="status-warn">{cfw}</span>'
+                    elif meta.get('cloud_firewall_lookup_failed'):
+                        fw_cell = '<span class="status-warn">Lookup failed</span>'
                     else:
-                        fw_cell = '<span class="na">N/A</span>'
+                        fw_cell = '<span class="na">Not checked</span>'
                 else:
                     if ep.firewall_status == 'Enabled':
                         fw_cell = '<span class="status-good">Enabled</span>'
@@ -506,8 +510,10 @@ class MSPReportExporter(ExporterBase):
                         rtp_ok += 1
                     elif rtp_val is False:
                         rtp_cell = '<span class="status-bad">Inactive</span>'
+                    elif meta.get('defender_protection_lookup_failed'):
+                        rtp_cell = '<span class="status-warn">Lookup failed</span>'
                     else:
-                        rtp_cell = '<span class="na">N/A</span>'
+                        rtp_cell = '<span class="na">Not checked</span>'
                 else:
                     if ep.antivirus_status == 'Active':
                         rtp_cell = '<span class="status-good">Active</span>'
