@@ -1,39 +1,25 @@
-"""General-purpose assessment runner.
+"""Run CMMC assessments for all clients defined in tenants.yaml.
 
-Unlike pilot_test.py (a single hardcoded ONPREM_PROFILE in Python source,
-by design, for initial validation only — its cloud tenant_id/client_id
-still come from environment variables, never from source), this script
-reads tenant configuration from a YAML file — see tenants.example.yaml for
-the format. Nothing about this file is specific to any one business; every
-real client's identifiers live in your own tenants.yaml (gitignored), never
-in this codebase.
+This is the production-oriented replacement for pilot_test.py — instead of
+hardcoding profiles in Python, it reads them from tenants.yaml so you can
+add a new client with 3 lines of YAML and zero code changes.
 
 Usage:
+    # Set your app secret (once per session):
+    $env:TENGUARD_GRAPH_CLIENT_SECRET = "your-secret-value"
 
-    # First time: copy the example config and fill in your real client details
-    cp tenants.example.yaml tenants.yaml
+    # Run all clients:
+    python run_assessment.py
 
-    # Run every configured tenant
-    python run_assessment.py --all
-
-    # Run just one tenant by its tenant_key
+    # Run a specific client:
     python run_assessment.py --tenant acme
 
-    # List configured tenants without running anything
-    python run_assessment.py --list
+    # Use a different config file:
+    python run_assessment.py --config my_clients.yaml
 
-    # Use a config file at a different path
-    python run_assessment.py --all --config /path/to/tenants.yaml
-
-Secrets: the default secret resolver reads environment variables named
-exactly as each tenant's secret_ref value says (e.g. secret_ref
-"ACME_GRAPH_CLIENT_SECRET" -> $env:ACME_GRAPH_CLIENT_SECRET). This is a
-reasonable default for a single operator running this locally, same as
-pilot_test.py's resolver — but it is NOT a real secrets-management solution.
-For anything beyond a single-operator setup (an MSP with many clients,
-several people running assessments), replace build_secret_resolver() below
-with a real vault/secret-store lookup before this touches real client data
-at scale.
+    # Demo mode (no real environment needed):
+    $env:CMMC_DEMO = "1"
+    python run_assessment.py
 """
 
 import argparse
@@ -48,31 +34,27 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
+from cmmc_gatherer.tenant_config_loader import load_tenants  # noqa: E402
 from cmmc_gatherer.orchestrator import TenantOrchestrator  # noqa: E402
-from cmmc_gatherer.tenant_config_loader import TenantConfigError, load_tenant_profiles  # noqa: E402
 from cmmc_gatherer.utils.compliance import ComplianceScorer  # noqa: E402
 from cmmc_gatherer.exporters.msp_report_exporter import MSPReportExporter  # noqa: E402
 
-logger = logging.getLogger(__name__)
 
+def secret_resolver(secret_ref: str) -> str:
+    """Read secrets from environment variables.
 
-def build_secret_resolver():
-    """Default resolver: environment variables, looked up by the secret_ref
-    name each tenant's config entry specifies. See this file's module
-    docstring for why this isn't sufficient beyond a single-operator setup.
+    For production, swap this with a vault/secret-store lookup.
     """
-    def resolve(secret_ref: str) -> str:
-        value = os.environ.get(secret_ref)
-        if value is None:
-            raise ValueError(
-                f"No environment variable set for secret_ref='{secret_ref}'. "
-                f"Set it before running, e.g.: $env:{secret_ref}='...'"
-            )
-        return value
-    return resolve
+    value = os.environ.get(secret_ref)
+    if value is None:
+        raise ValueError(
+            f"No environment variable set for '{secret_ref}'. "
+            f"Set it before running, e.g.: $env:{secret_ref}='...'"
+        )
+    return value
 
 
-def summarize(result) -> None:
+def summarize(result):
     print(f"\n{'=' * 60}")
     print(f"Tenant: {result.display_name} ({result.tenant_key})")
     print(f"{'=' * 60}")
@@ -88,6 +70,11 @@ def summarize(result) -> None:
     print(f"  Scoring coverage: {coverage['assessed_count']}/{coverage['total_count']} categories "
           f"({coverage['assessed_weight_pct']}% of scoring weight)"
           + (" — COVERAGE INCOMPLETE" if coverage['assessed_weight_pct'] < 100 else ""))
+    for dim in ('firewall', 'antivirus', 'updates', 'policies', 'event_logging', 'ad_security'):
+        method = getattr(ComplianceScorer, f'_score_{dim}')
+        val = method(c)
+        shown = f"{val}/100" if val is not None else "N/A (no applicable data)"
+        print(f"    {dim:15s}: {shown}")
     if result.errors:
         print(f"  ERRORS ({len(result.errors)}):")
         for e in result.errors:
@@ -96,42 +83,37 @@ def summarize(result) -> None:
         print("  No errors reported.")
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Run CMMC evidence collection for one or more configured tenants.")
-    parser.add_argument("--config", default="tenants.yaml",
-                         help="Path to the tenant config file (default: tenants.yaml)")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--all", action="store_true", help="Run every tenant in the config file")
-    group.add_argument("--tenant", metavar="TENANT_KEY", help="Run only the named tenant")
-    group.add_argument("--list", action="store_true", help="List configured tenants and exit")
+def main():
+    parser = argparse.ArgumentParser(
+        description="Run CMMC assessments from tenants.yaml"
+    )
+    parser.add_argument(
+        "--config", default="tenants.yaml",
+        help="Path to YAML config file (default: tenants.yaml)"
+    )
+    parser.add_argument(
+        "--tenant", default=None,
+        help="Run only this tenant_key (default: all)"
+    )
+    parser.add_argument(
+        "--demo", action="store_true",
+        help="Enable demo mode (same as CMMC_DEMO=1)"
+    )
     args = parser.parse_args()
 
-    try:
-        profiles = load_tenant_profiles(args.config)
-    except TenantConfigError as e:
-        print(f"Config error: {e}", file=sys.stderr)
-        return 1
+    demo = args.demo or bool(int(os.environ.get("CMMC_DEMO", "0")))
 
-    if args.list:
-        print(f"{len(profiles)} tenant(s) configured in {args.config}:")
-        for p in profiles:
-            try:
-                p.validate()
-                print(f"  {p.tenant_key:20s} {p.display_name:30s} [{p.deployment_mode()}]")
-            except ValueError as e:
-                print(f"  {p.tenant_key:20s} {p.display_name:30s} [INVALID CONFIG: {e}]")
-        return 0
+    profiles = load_tenants(args.config)
 
     if args.tenant:
-        matches = [p for p in profiles if p.tenant_key == args.tenant]
-        if not matches:
-            available = ", ".join(p.tenant_key for p in profiles)
-            print(f"No tenant with tenant_key '{args.tenant}' found in {args.config}. "
-                  f"Available: {available}", file=sys.stderr)
-            return 1
-        profiles = matches
+        profiles = [p for p in profiles if p.tenant_key == args.tenant]
+        if not profiles:
+            print(f"No tenant with key '{args.tenant}' found in {args.config}")
+            sys.exit(1)
 
-    orchestrator = TenantOrchestrator(secret_resolver=build_secret_resolver())
+    print(f"Running assessments for {len(profiles)} client(s)...")
+
+    orchestrator = TenantOrchestrator(secret_resolver=secret_resolver, demo=demo)
     results = orchestrator.run_all(profiles)
 
     for result in results.values():
@@ -142,14 +124,14 @@ def main() -> int:
         MSPReportExporter().export(
             result.collection, out_path,
             customer_name=result.display_name,
-            assessment_id=f"CMMC-{result.tenant_key.upper()}",
+            assessment_id=f"ASSESS-{result.tenant_key.upper()}",
             scope_result=result.scope_result,
             health_log=result.health_log,
         )
         print(f"\nReport written: {out_path}")
 
-    return 0
+    print(f"\nDone — {len(results)} assessment(s) complete.")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
