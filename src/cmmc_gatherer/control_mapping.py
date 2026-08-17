@@ -87,9 +87,12 @@ class EvidenceMapping:
 DOMAIN_NAMES: Dict[str, str] = {
     "AC": "Access Control",
     "AU": "Audit and Accountability",
+    "CA": "Security Assessment",
     "CM": "Configuration Management",
     "IA": "Identification and Authentication",
+    "IR": "Incident Response",
     "MP": "Media Protection",
+    "RA": "Risk Assessment",
     "SC": "System and Communications Protection",
     "SI": "System and Information Integrity",
 }
@@ -98,7 +101,7 @@ DOMAIN_NAMES: Dict[str, str] = {
 # DOMAIN_NAMES above) the day a new domain's evidence actually gets added —
 # until then, a domain with zero mapped evidence simply never renders, so
 # there's no harm in this list being ahead of what's collected today.
-DOMAIN_ORDER: List[str] = ["AC", "AU", "CM", "IA", "MP", "SC", "SI"]
+DOMAIN_ORDER: List[str] = ["AC", "AU", "CA", "CM", "IA", "IR", "MP", "RA", "SC", "SI"]
 
 PRACTICES: Dict[str, Practice] = {
     "IA.L2-3.5.3": Practice(
@@ -204,6 +207,54 @@ PRACTICES: Dict[str, Practice] = {
         "MP.L1-3.8.3", "MP", 1, "Media Disposal",
         "Sanitize or destroy information system media containing Federal "
         "Contract Information before disposal or release for reuse.",
+    ),
+    "SI.L2-3.14.3": Practice(
+        "SI.L2-3.14.3", "SI", 2, "Security Alerts & Advisories",
+        "Monitor system security alerts and advisories and take action in response.",
+    ),
+    "SI.L2-3.14.6": Practice(
+        "SI.L2-3.14.6", "SI", 2, "Monitor Communications for Attacks",
+        "Monitor organizational systems, including inbound and outbound "
+        "communications traffic, to detect attacks and indicators of potential attacks.",
+    ),
+    "SI.L2-3.14.7": Practice(
+        "SI.L2-3.14.7", "SI", 2, "Identify Unauthorized Use",
+        "Identify unauthorized use of organizational systems.",
+    ),
+    "SI.L1-3.14.4": Practice(
+        "SI.L1-3.14.4", "SI", 1, "Update Malicious Code Protection",
+        "Update malicious code protection mechanisms when new releases are available.",
+    ),
+    "SI.L1-3.14.5": Practice(
+        "SI.L1-3.14.5", "SI", 1, "System & File Scanning",
+        "Perform periodic scans of the information system and real-time scans "
+        "of files from external sources as files are downloaded, opened, or executed.",
+    ),
+    "RA.L2-3.11.2": Practice(
+        "RA.L2-3.11.2", "RA", 2, "Vulnerability Scan",
+        "Scan for vulnerabilities in organizational systems and applications "
+        "periodically and when new vulnerabilities affecting those systems "
+        "and applications are identified.",
+    ),
+    "RA.L2-3.11.3": Practice(
+        "RA.L2-3.11.3", "RA", 2, "Vulnerability Remediation",
+        "Remediate vulnerabilities in accordance with risk assessments.",
+    ),
+    "IR.L2-3.6.1": Practice(
+        "IR.L2-3.6.1", "IR", 2, "Incident Handling",
+        "Establish an operational incident-handling capability for organizational "
+        "systems that includes preparation, detection, analysis, containment, "
+        "recovery, and user response activities.",
+    ),
+    "CA.L2-3.12.1": Practice(
+        "CA.L2-3.12.1", "CA", 2, "Security Control Assessment",
+        "Periodically assess the security controls in organizational systems "
+        "to determine if the controls are effective in their application.",
+    ),
+    "CA.L2-3.12.2": Practice(
+        "CA.L2-3.12.2", "CA", 2, "Plan of Action",
+        "Develop and implement plans of action designed to correct deficiencies "
+        "and reduce or eliminate vulnerabilities in organizational systems.",
     ),
 }
 
@@ -323,6 +374,86 @@ EVIDENCE_MAP: List[EvidenceMapping] = [
     EvidenceMapping(
         "guest_group_membership", "Guest account and group membership status",
         ["AC.L1-3.1.1", "AC.L1-3.1.2"], Confidence.SUPPORTING,
+    ),
+
+    # ── MDE Alert Collector ──────────────────────────────────────────────
+    EvidenceMapping(
+        "mde_alerts_lifecycle",
+        "MDE alert monitoring, investigation, and resolution lifecycle",
+        ["SI.L2-3.14.3"], Confidence.DIRECT,
+    ),
+    EvidenceMapping(
+        "mde_attack_detection",
+        "MDE detection of attacks and indicators of potential attacks",
+        ["SI.L2-3.14.6"], Confidence.SUPPORTING,
+    ),
+    EvidenceMapping(
+        "mde_unauthorized_use_detection",
+        "MDE detection of unauthorized use of systems",
+        ["SI.L2-3.14.7"], Confidence.SUPPORTING,
+    ),
+    EvidenceMapping(
+        "mde_incident_handling",
+        "MDE alert triage, assignment, and investigation as incident handling evidence",
+        ["IR.L2-3.6.1"], Confidence.SUPPORTING,
+    ),
+
+    # ── MDE Vulnerability Collector ──────────────────────────────────────
+    EvidenceMapping(
+        "mde_vulnerability_findings",
+        "MDE TVM per-device vulnerability findings (continuous scanning)",
+        ["RA.L2-3.11.2"], Confidence.DIRECT,
+    ),
+    EvidenceMapping(
+        "mde_flaw_identification",
+        "MDE identification of software vulnerabilities as system flaws",
+        ["SI.L1-3.14.1"], Confidence.SUPPORTING,
+    ),
+
+    # ── MDE Remediation Collector ────────────────────────────────────────
+    EvidenceMapping(
+        "mde_vulnerability_remediation_tracking",
+        "MDE TVM remediation tasks with status, deadlines, and device progress",
+        ["RA.L2-3.11.3"], Confidence.DIRECT,
+    ),
+    EvidenceMapping(
+        "mde_flaw_remediation",
+        "MDE remediation tasks as evidence of timely flaw correction",
+        ["SI.L1-3.14.1"], Confidence.SUPPORTING,
+    ),
+    EvidenceMapping(
+        "mde_remediation_plans",
+        "MDE TVM remediation tasks as tracked corrective actions (POA&M subset)",
+        ["CA.L2-3.12.2"], Confidence.SUPPORTING,
+    ),
+
+    # ── MDE Secure Config Collector ──────────────────────────────────────
+    EvidenceMapping(
+        "mde_security_config_assessment",
+        "MDE per-device security configuration compliance (observed state)",
+        ["CM.L2-3.4.2"], Confidence.DIRECT,
+    ),
+    EvidenceMapping(
+        "mde_security_config_baseline_support",
+        "MDE configuration assessment as implicit baseline documentation",
+        ["CM.L2-3.4.1"], Confidence.SUPPORTING,
+    ),
+
+    # ── MDE Baseline Collector ───────────────────────────────────────────
+    EvidenceMapping(
+        "mde_baseline_compliance",
+        "MDE security baseline profile compliance per device",
+        ["CM.L2-3.4.1"], Confidence.DIRECT,
+    ),
+    EvidenceMapping(
+        "mde_baseline_enforcement_support",
+        "MDE baseline compliance as evidence of configuration enforcement",
+        ["CM.L2-3.4.2"], Confidence.SUPPORTING,
+    ),
+    EvidenceMapping(
+        "mde_security_control_assessment",
+        "MDE configuration and baseline assessments as security control effectiveness evidence",
+        ["CA.L2-3.12.1"], Confidence.SUPPORTING,
     ),
 ]
 

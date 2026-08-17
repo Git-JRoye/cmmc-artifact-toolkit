@@ -28,6 +28,11 @@ from .cloud.graph import GraphClient, MdeClient, build_auth_provider
 from .collectors.cloud.cloud_event_collector import CloudSecurityEventCollector
 from .collectors.cloud.cloud_policy_collector import CloudPolicyCollector
 from .collectors.cloud.defender_device_collector import DefenderDeviceCollector
+from .collectors.cloud.mde_alert_collector import MdeAlertCollector
+from .collectors.cloud.mde_baseline_collector import MdeBaselineCollector
+from .collectors.cloud.mde_remediation_collector import MdeRemediationCollector
+from .collectors.cloud.mde_secure_config_collector import MdeSecureConfigCollector
+from .collectors.cloud.mde_vulnerability_collector import MdeVulnerabilityCollector
 from .collectors.cloud.entra_identity_collector import EntraIdentityCollector
 from .collectors.cloud.service_principal_collector import ServicePrincipalCollector
 from .collectors.cloud.intune_rbac_collector import IntuneRbacCollector
@@ -357,14 +362,70 @@ class TenantOrchestrator:
         # never take down anything else. Always applies mde_atp_* metadata
         # to every endpoint either way, success or failure, so those keys
         # are never conditionally absent depending on what happened here.
+        mde_client = None
         try:
             mde_client = MdeClient(profile, self.secret_resolver)
-            mde_by_aad_id = DefenderDeviceCollector(mde_client).collect()
-            self._apply_mde_atp_data(endpoints, mde_by_aad_id, lookup_failed=False)
         except Exception as e:
-            logger.error("[%s] Defender for Endpoint collector failed: %s", profile.tenant_key, e)
-            errors.append(f"defender_atp: {e}")
+            logger.error("[%s] MDE client auth failed: %s", profile.tenant_key, e)
+            errors.append(f"mde_auth: {e}")
+
+        if mde_client is not None:
+            try:
+                mde_by_aad_id = DefenderDeviceCollector(mde_client).collect()
+                self._apply_mde_atp_data(endpoints, mde_by_aad_id, lookup_failed=False)
+            except Exception as e:
+                logger.error("[%s] Defender device collector failed: %s", profile.tenant_key, e)
+                errors.append(f"defender_atp: {e}")
+                self._apply_mde_atp_data(endpoints, {}, lookup_failed=True)
+        else:
             self._apply_mde_atp_data(endpoints, {}, lookup_failed=True)
+
+        # ── Additional MDE collectors ────────────────────────────────────
+        # Each is isolated: a failure in one never prevents the others from
+        # running. All require a working MdeClient — if MDE auth failed
+        # above (mde_client is None), these are skipped entirely rather
+        # than repeating the same auth failure 4 more times.
+        if mde_client is not None:
+            try:
+                events_mde_alerts = MdeAlertCollector(mde_client).collect()
+            except Exception as e:
+                logger.error("[%s] MDE alert collector failed: %s", profile.tenant_key, e)
+                errors.append(f"mde_alerts: {e}")
+                events_mde_alerts = []
+
+            try:
+                events_mde_vulns = MdeVulnerabilityCollector(mde_client).collect()
+            except Exception as e:
+                logger.error("[%s] MDE vulnerability collector failed: %s", profile.tenant_key, e)
+                errors.append(f"mde_vulnerabilities: {e}")
+                events_mde_vulns = []
+
+            try:
+                events_mde_remediation = MdeRemediationCollector(mde_client).collect()
+            except Exception as e:
+                logger.error("[%s] MDE remediation collector failed: %s", profile.tenant_key, e)
+                errors.append(f"mde_remediation: {e}")
+                events_mde_remediation = []
+
+            try:
+                policies_mde_config = MdeSecureConfigCollector(mde_client).collect()
+            except Exception as e:
+                logger.error("[%s] MDE secure config collector failed: %s", profile.tenant_key, e)
+                errors.append(f"mde_secure_config: {e}")
+                policies_mde_config = []
+
+            try:
+                policies_mde_baseline = MdeBaselineCollector(mde_client).collect()
+            except Exception as e:
+                logger.error("[%s] MDE baseline collector failed: %s", profile.tenant_key, e)
+                errors.append(f"mde_baseline: {e}")
+                policies_mde_baseline = []
+        else:
+            events_mde_alerts = []
+            events_mde_vulns = []
+            events_mde_remediation = []
+            policies_mde_config = []
+            policies_mde_baseline = []
 
         ad_objects: List = []
         try:
@@ -398,6 +459,10 @@ class TenantOrchestrator:
         except Exception as e:
             logger.error("[%s] Cloud policy collector failed: %s", profile.tenant_key, e)
             errors.append(f"cloud_policies: {e}")
+
+        # Merge MDE-sourced events and policies into the main lists
+        events += events_mde_alerts + events_mde_vulns + events_mde_remediation
+        policies += policies_mde_config + policies_mde_baseline
 
         return endpoints, ad_objects, events, policies, errors
 
