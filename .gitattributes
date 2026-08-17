@@ -1,0 +1,15 @@
+# Normalize line endings so a Windows/OneDrive checkout doesn't produce
+# spurious CRLF-vs-LF diffs across the whole tree. Let git auto-detect text
+# files by default, but pin the file types this repo actually has to LF —
+# except PowerShell scripts, which are Windows-native and get CRLF.
+* text=auto
+
+*.py text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+
+*.ps1 text eol=crlf
