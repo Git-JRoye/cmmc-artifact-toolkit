@@ -78,10 +78,26 @@ class ServicePrincipalCollector(CollectorBase):
 
     def collect(self) -> List[ADObject]:
         out: List[ADObject] = []
+        # PILOT FINDING (real, confirmed via external review): the same
+        # service principal (Synology Active Backup for M365) appeared
+        # twice in a real report, with identical permissions each time.
+        # Deduplicated defensively at this collector level by (app_id or
+        # id) rather than tracking down the exact upstream cause (a
+        # possible pagination overlap in get_all, or the same app being
+        # yielded more than once for some other reason) — this guarantees
+        # correctness for the report regardless of what the real cause
+        # turns out to be.
+        seen_keys = set()
         params = {"$select": "id,appId,displayName,accountEnabled,servicePrincipalType"}
         try:
             for sp in self.graph.get_all("servicePrincipals", params=params):
                 sp_id = sp.get("id")
+                dedup_key = sp.get("appId") or sp_id
+                if dedup_key and dedup_key in seen_keys:
+                    continue
+                if dedup_key:
+                    seen_keys.add(dedup_key)
+
                 name = sp.get("displayName") or sp.get("appId") or "Unnamed Application"
                 if sp_id:
                     permission_names, lookup_failed = self._resolve_permission_grants(sp_id, name)
@@ -116,6 +132,16 @@ class ServicePrincipalCollector(CollectorBase):
         each application permission it holds, resolved to its real,
         human-readable name, not just a count. Failure here is isolated to
         this one principal; never affects the rest of the inventory.
+
+        PILOT FINDING (real, confirmed via external review): a real report
+        showed the same permission (Sites.FullControl.All) listed twice
+        within one app's own permission list. Deduplicated here rather
+        than tracking down the exact upstream cause (Graph can genuinely
+        return overlapping appRoleAssignments entries for the same
+        resource+role in some tenant configurations, e.g. a permission
+        granted via more than one consent path) — the report should never
+        show the same permission name twice for one app regardless of why
+        the raw data had a duplicate.
         """
         names: List[str] = []
         try:
@@ -126,7 +152,9 @@ class ServicePrincipalCollector(CollectorBase):
                     continue
                 role_name = self._resolve_role_name(resource_id, app_role_id)
                 names.append(role_name or f"Unknown permission ({app_role_id})")
-            return names, False
+            # Order-preserving dedup — a real duplicate grant should not
+            # show the same permission name twice in the report.
+            return list(dict.fromkeys(names)), False
         except Exception as e:
             logger.warning("  Could not resolve permission grants for '%s': %s", name, e)
             return [], True

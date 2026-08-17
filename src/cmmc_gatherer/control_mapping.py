@@ -163,6 +163,11 @@ PRACTICES: Dict[str, Practice] = {
         "Prevent non-privileged users from executing privileged functions and "
         "capture the execution of such functions in audit logs.",
     ),
+    "AC.L2-3.1.5": Practice(
+        "AC.L2-3.1.5", "AC", 2, "Least Privilege",
+        "Employ the principle of least privilege, including for specific "
+        "security functions and privileged accounts.",
+    ),
     "AC.L1-3.1.1": Practice(
         "AC.L1-3.1.1", "AC", 1, "Authorized Access Control",
         "Limit system access to authorized users, processes acting on behalf "
@@ -313,7 +318,7 @@ EVIDENCE_MAP: List[EvidenceMapping] = [
     ),
     EvidenceMapping(
         "privileged_role_tracking", "Privileged role / group membership tracking",
-        ["AC.L2-3.1.7"], Confidence.SUPPORTING,
+        ["AC.L2-3.1.7", "AC.L2-3.1.5"], Confidence.SUPPORTING,
     ),
     EvidenceMapping(
         "guest_group_membership", "Guest account and group membership status",

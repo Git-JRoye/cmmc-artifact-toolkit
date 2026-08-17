@@ -212,15 +212,18 @@ class MSPReportExporter(ExporterBase):
             ext = ext or '.html'
             software_path = f"{base}_software{ext}"
             health_path = f"{base}_health{ext}"
+            apps_path = f"{base}_apps{ext}"
             main_filename = os.path.basename(output_path)
             software_filename = os.path.basename(software_path)
             health_filename = os.path.basename(health_path)
+            apps_filename = os.path.basename(apps_path)
 
             onprem_eps = self._onprem_endpoints(artifacts)
             cloud_eps = self._cloud_endpoints(artifacts)
             ad_users = self._ad_users(artifacts)
             present_evidence = self._present_evidence_keys(artifacts, onprem_eps, cloud_eps, ad_users)
             has_software = 'installed_software' in present_evidence
+            has_apps = bool(self._service_principals(artifacts))
             health_log = health_log or []
 
             html_content = self._generate_msp_report(
@@ -229,6 +232,7 @@ class MSPReportExporter(ExporterBase):
                 scope_result=scope_result,
                 health_log=health_log,
                 health_href=health_filename,
+                apps_href=apps_filename if has_apps else None,
             )
             # Explicit UTF-8 write: without it, Python falls back to the
             # platform's default encoding (often cp1252 on Windows), which
@@ -247,6 +251,14 @@ class MSPReportExporter(ExporterBase):
                 with open(software_path, 'w', encoding='utf-8') as f:
                     f.write(software_html)
                 logger.info(f"Exported software inventory: {software_path}")
+
+            if has_apps:
+                apps_html = self._generate_enterprise_apps_page(
+                    artifacts, customer_name, assessment_id, back_href=main_filename,
+                )
+                with open(apps_path, 'w', encoding='utf-8') as f:
+                    f.write(apps_html)
+                logger.info(f"Exported enterprise applications: {apps_path}")
 
             # Always written, even with zero entries — a "no issues this
             # run" page is itself a meaningful, reassuring result, not
@@ -299,6 +311,7 @@ class MSPReportExporter(ExporterBase):
         scope_result: Optional[Any] = None,
         health_log: Optional[List[Any]] = None,
         health_href: Optional[str] = None,
+        apps_href: Optional[str] = None,
     ) -> str:
         compliance_score = ComplianceScorer.calculate_overall_score(artifacts)
         coverage = ComplianceScorer.calculate_coverage(artifacts)
@@ -376,7 +389,7 @@ class MSPReportExporter(ExporterBase):
 <body>
     <div class="header">
         <h1>CMMC Compliance Assessment Report</h1>
-        <div class="subtitle">Third-Party Audit Ready</div>
+        <div class="subtitle">Evidence Collection Report</div>
     </div>
 
     <div class="content">
@@ -435,6 +448,10 @@ class MSPReportExporter(ExporterBase):
                 av_color = 'status-good' if ep.antivirus_status == 'Active' else 'status-bad'
                 disabled_profiles = self._disabled_firewall_profiles(ep)
                 fw_note = f" ({', '.join(disabled_profiles)} disabled)" if disabled_profiles else ""
+                # A device merged from both planes (matched by hostname — see
+                # orchestrator._merge_endpoints) carries its Intune record
+                # under metadata['intune']. Surface that here so the signal
+                # isn't lost just because it's reported once, not twice.
                 intune = (ep.metadata or {}).get('intune')
                 if intune:
                     compliant = intune.get('is_compliant')
@@ -569,6 +586,9 @@ class MSPReportExporter(ExporterBase):
                 stale_color = 'status-bad' if stale else ('status-good' if stale is False else 'status-neutral')
                 stale_label = 'Yes' if stale else ('No' if stale is False else 'Unknown')
 
+                # Privileged: True/False is a real answer either plane produced;
+                # None means the lookup itself failed/wasn't attempted — shown
+                # as Unknown, never silently rendered as "No".
                 privileged = attrs.get('isPrivileged')
                 roles = attrs.get('privilegedRoles') or []
                 if privileged is True:
@@ -579,6 +599,8 @@ class MSPReportExporter(ExporterBase):
                 else:
                     priv_color, priv_label = 'status-neutral', 'Unknown'
 
+                # MFA is a cloud-only concept today — on-prem AD has no MFA
+                # signal, so it's N/A, not a false "No".
                 mfa = attrs.get('isMfaRegistered')
                 methods = attrs.get('mfaMethods') or []
                 if not is_cloud:
@@ -591,6 +613,10 @@ class MSPReportExporter(ExporterBase):
                 else:
                     mfa_cell = '<span class="status-neutral">Unknown</span>'
 
+                # Granular auth method type/strength — supplementary to MFA
+                # Registered above, never a substitute for it (see the
+                # federated-identity caveat in the paragraph above this
+                # table, and in entra_identity_collector.py's own docstring).
                 weakest_tier = attrs.get('weakestAuthMethodTier')
                 auth_details = attrs.get('authMethodDetails') or []
                 auth_lookup_failed = attrs.get('authMethodLookupFailed')
@@ -649,48 +675,29 @@ class MSPReportExporter(ExporterBase):
 
         service_principals = self._service_principals(artifacts)
         if service_principals:
+            high_priv_sps = [sp for sp in service_principals if (sp.attributes or {}).get('high_privilege_permissions')]
+            apps_link_href = apps_href or "enterprise_apps.html"
+            high_priv_rows_html = "".join(self._service_principal_row_html(sp) for sp in high_priv_sps)
             html += f"""        <div class="section" id="sec-enterprise-apps">
             <h2>Enterprise Applications</h2>
             {self._satisfies_badge_html(['enterprise_app_inventory', 'high_privilege_app_permission'], present_evidence)}
             <p style="font-size:0.92em;color:#475569;">
-                Every application/service principal registered in this tenant — processes acting
-                with their own identity, not human users. Expand a device's permission list to see
-                the actual resolved permission names it holds; any high-privilege permission is
-                flagged separately below and in Findings.
+                {len(service_principals)} application(s)/service principal(s) registered in this
+                tenant — processes acting with their own identity, not human users. The full
+                inventory (including apps with no high-privilege permission) is in
+                <a href="{apps_link_href}">{apps_link_href}</a>. Applications holding a
+                high-privilege permission are shown directly below, since those are the ones
+                most worth reviewing first.
             </p>
-            <table>
-                <tr><th>Name</th><th>App ID</th><th>Enabled</th><th>Type</th><th>Permissions</th></tr>
 """
-            for sp in service_principals:
-                attrs = sp.attributes or {}
-                enabled = attrs.get('account_enabled')
-                enabled_color = 'status-good' if enabled else 'status-warn'
-                grant_failed = attrs.get('permission_lookup_failed')
-                permission_names = attrs.get('permission_names') or []
-                high_priv = attrs.get('high_privilege_permissions') or []
-                if grant_failed:
-                    grant_cell = '<span class="status-warn">Lookup failed</span>'
-                elif permission_names:
-                    items = "".join(
-                        f"<li>{p}{' <span class=\"badge supporting\">HIGH PRIVILEGE</span>' if p in high_priv else ''}</li>"
-                        for p in sorted(permission_names)
-                    )
-                    grant_cell = (
-                        f'<details><summary>{len(permission_names)} permission(s)'
-                        f'{" — includes high-privilege" if high_priv else ""}</summary>'
-                        f'<ul style="margin:6px 0 0 18px;font-size:0.85em;max-height:150px;'
-                        f'overflow-y:auto;">{items}</ul></details>'
-                    )
-                else:
-                    grant_cell = '<span class="na">None</span>'
-                html += (
-                    f"                <tr><td>{sp.distinguished_name}</td>"
-                    f"<td style=\"font-size:0.85em;color:#64748b;\">{attrs.get('app_id', 'Unknown')}</td>"
-                    f"<td><span class=\"{enabled_color}\">{enabled}</span></td>"
-                    f"<td>{attrs.get('service_principal_type', 'Unknown')}</td>"
-                    f"<td>{grant_cell}</td></tr>\n"
-                )
-            html += "            </table>\n        </div>\n"
+            if high_priv_rows_html:
+                html += f"""            <table>
+                <tr><th>Name</th><th>App ID</th><th>Enabled</th><th>Type</th><th>Permissions</th></tr>
+{high_priv_rows_html}            </table>
+"""
+            else:
+                html += '            <p class="na">No application currently holds a high-privilege permission.</p>\n'
+            html += "        </div>\n"
 
         intune_role_assignments = [o for o in artifacts.ad_objects if o.object_class == 'intune_role_assignment']
         if intune_role_assignments:
@@ -1428,11 +1435,27 @@ class MSPReportExporter(ExporterBase):
                     f"not a collection gap or something to fix.</li>"
                 )
             if other_hosts:
+                # PILOT FINDING (real, confirmed via external review): this
+                # wording used to assert "a real device state, not a
+                # collection error" as settled fact. But a real device
+                # (ROYEPC, now Corporate-owned) demonstrably had ~100
+                # packages installed via an on-prem scan the SAME evening,
+                # while its separate Intune cloud record showed empty —
+                # meaning "the API call succeeded" does NOT actually prove
+                # "the device genuinely has no software." Softened to be
+                # honest about what's actually known (the call didn't
+                # error) versus what's genuinely uncertain (why the result
+                # was empty).
                 status_notes.append(
-                    f"<li><strong>Confirmed empty</strong> for: {', '.join(other_hosts)}. "
-                    f"Collection succeeded, but no software was inventoried — for Intune-managed devices this "
-                    f"commonly means the device hasn't completed an app-inventory sync yet, which is a real "
-                    f"device state, not a collection error.</li>"
+                    f"<li><strong>No software reported</strong> for: {', '.join(other_hosts)}. "
+                    f"The Graph call itself succeeded (this is not a collector error), but "
+                    f"Intune returned no inventoried software for these device(s). This does "
+                    f"NOT necessarily mean the device has no software installed — it may "
+                    f"reflect a pending or incomplete app-inventory sync, a device that hasn't "
+                    f"checked in recently enough for that specific data, or another gap this "
+                    f"tool cannot distinguish from Graph's response alone. Treat this as "
+                    f"\"no data currently available,\" not as confirmed proof the device has "
+                    f"no installed software.</li>"
                 )
         if by_status.get('not_attempted'):
             status_notes.append(
@@ -1466,7 +1489,17 @@ class MSPReportExporter(ExporterBase):
         full table lived inline here too — moved out because it will only
         keep growing as more devices/software get collected, and updating
         the software list shouldn't require regenerating the whole
-        compliance report."""
+        compliance report.
+
+        PILOT FINDING (real, confirmed via external review): the summary
+        count line used to read "98 unique software package(s) across 4
+        endpoint(s)" — technically true, but misleading when the
+        disclosure directly below it says three of those four contributed
+        nothing. A reader skimming just the count line would assume
+        software was actually found across all 4 devices. Now states how
+        many endpoints actually CONTRIBUTED software, not just the total
+        endpoint count, so the two lines never contradict each other.
+        """
         if 'installed_software' not in present_evidence:
             return ""
 
@@ -1474,13 +1507,18 @@ class MSPReportExporter(ExporterBase):
         if not grouped:
             return ""
 
+        contributing_hosts = set()
+        for hosts in grouped.values():
+            contributing_hosts.update(hosts)
+
         badge = self._satisfies_badge_html(['installed_software'], present_evidence)
         notes_html = self._software_status_notes_html(by_status, owner_type_by_hostname)
         href = software_href or "software_inventory.html"
         return f"""        <div class="section" id="sec-software-inventory">
             <h2>Installed Software Inventory</h2>
             {badge}
-            <p>{len(grouped)} unique software package(s) across {len(artifacts.endpoints)} endpoint(s) —
+            <p>{len(grouped)} unique software package(s) found on {len(contributing_hosts)} of
+            {len(artifacts.endpoints)} endpoint(s) —
             see the full list in <a href="{href}">{href}</a>.</p>
             {notes_html}
         </div>
@@ -1498,6 +1536,10 @@ class MSPReportExporter(ExporterBase):
         customer_name = customer_name or "Unnamed Customer"
         assessment_id = assessment_id or "CMMC-" + datetime.now().strftime("%Y%m%d%H%M%S")
 
+        contributing_hosts = set()
+        for hosts in grouped.values():
+            contributing_hosts.update(hosts)
+
         return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -1514,12 +1556,89 @@ class MSPReportExporter(ExporterBase):
         <p class="back-link"><a href="{back_href}">&larr; Back to main compliance report</a></p>
         <div class="section" id="sec-software-inventory-table">
             <h2>Software Packages</h2>
-            <p>{len(grouped)} unique software package(s) across {len(artifacts.endpoints)} endpoint(s).</p>
+            <p>{len(grouped)} unique software package(s) found on {len(contributing_hosts)} of
+            {len(artifacts.endpoints)} endpoint(s).</p>
             <table>
                 <tr><th>Name</th><th>Version</th><th>Publisher</th><th>Found On</th></tr>
 {rows_html}
             </table>
             {notes_html}
+        </div>
+        <p class="back-link"><a href="{back_href}">&larr; Back to main compliance report</a></p>
+    </div>
+</body>
+</html>"""
+
+    @staticmethod
+    def _service_principal_row_html(sp: Any) -> str:
+        """One Enterprise Applications table row — shared between the
+        main report's high-privilege-only inline table and the standalone
+        full-inventory page, so the two can never render a service
+        principal differently."""
+        attrs = sp.attributes or {}
+        enabled = attrs.get('account_enabled')
+        enabled_color = 'status-good' if enabled else 'status-warn'
+        grant_failed = attrs.get('permission_lookup_failed')
+        permission_names = attrs.get('permission_names') or []
+        high_priv = attrs.get('high_privilege_permissions') or []
+        if grant_failed:
+            grant_cell = '<span class="status-warn">Lookup failed</span>'
+        elif permission_names:
+            items = "".join(
+                f"<li>{p}{' <span class=\"badge supporting\">HIGH PRIVILEGE</span>' if p in high_priv else ''}</li>"
+                for p in sorted(permission_names)
+            )
+            grant_cell = (
+                f'<details><summary>{len(permission_names)} permission(s)'
+                f'{" — includes high-privilege" if high_priv else ""}</summary>'
+                f'<ul style="margin:6px 0 0 18px;font-size:0.85em;max-height:150px;'
+                f'overflow-y:auto;">{items}</ul></details>'
+            )
+        else:
+            grant_cell = '<span class="na">None</span>'
+        return (
+            f"                <tr><td>{sp.distinguished_name}</td>"
+            f"<td style=\"font-size:0.85em;color:#64748b;\">{attrs.get('app_id', 'Unknown')}</td>"
+            f"<td><span class=\"{enabled_color}\">{enabled}</span></td>"
+            f"<td>{attrs.get('service_principal_type', 'Unknown')}</td>"
+            f"<td>{grant_cell}</td></tr>\n"
+        )
+
+    def _generate_enterprise_apps_page(self, artifacts: Any, customer_name: Optional[str],
+                                        assessment_id: Optional[str], back_href: str) -> str:
+        """The standalone Enterprise Applications page — same pattern as
+        the software inventory page. Built specifically because a real
+        pilot showed a 287-application tenant rendering ~30,000 of the
+        main report's ~46,000 characters just for this one table — the
+        main report now shows only the high-privilege subset inline, with
+        the full inventory living here instead."""
+        service_principals = self._service_principals(artifacts)
+        rows_html = "".join(self._service_principal_row_html(sp) for sp in service_principals)
+        customer_name = customer_name or "Unnamed Customer"
+        assessment_id = assessment_id or "CMMC-" + datetime.now().strftime("%Y%m%d%H%M%S")
+
+        return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Enterprise Applications — {customer_name}</title>
+    <style>{_BASE_CSS}</style>
+</head>
+<body>
+    <div class="header">
+        <h1>Enterprise Applications</h1>
+        <div class="subtitle">{customer_name} — {assessment_id}</div>
+    </div>
+    <div class="content">
+        <p class="back-link"><a href="{back_href}">&larr; Back to main compliance report</a></p>
+        <div class="section" id="sec-enterprise-apps-table">
+            <h2>Registered Applications / Service Principals</h2>
+            <p>{len(service_principals)} application(s)/service principal(s) registered in this
+            tenant — processes acting with their own identity, not human users.</p>
+            <table>
+                <tr><th>Name</th><th>App ID</th><th>Enabled</th><th>Type</th><th>Permissions</th></tr>
+{rows_html}
+            </table>
         </div>
         <p class="back-link"><a href="{back_href}">&larr; Back to main compliance report</a></p>
     </div>
@@ -1817,13 +1936,41 @@ class MSPReportExporter(ExporterBase):
         # the ad_security score number — it was never surfaced as an actual
         # finding. A privileged account without MFA is a real, high-severity
         # gap on its own, independent of the overall AD/identity score.
+        #
+        # PILOT FINDING (real, confirmed via external review): this used to
+        # raise the Critical finding purely off isMfaRegistered (from the
+        # MFA registration report, Reports.Read.All — a source that can
+        # lag). A real user showed isMfaRegistered=False here while
+        # authMethodDetails (the newer, live UserAuthenticationMethod.Read.All
+        # data) showed a genuinely registered Microsoft Authenticator method
+        # — the two sources directly disagreed, and trusting only the
+        # stale one produced a probably-false Critical finding. The live
+        # signal is preferred when it's actually available (the lookup
+        # didn't fail); when the two sources disagree, that disagreement
+        # is surfaced as its own finding rather than silently trusting
+        # either one.
         ad_users = self._ad_users(artifacts)
-        privileged_no_mfa = [
-            (u.attributes or {}).get('displayName') or (u.attributes or {}).get('sAMAccountName') or u.distinguished_name
-            for u in ad_users
-            if (u.attributes or {}).get('isPrivileged') is True
-            and (u.attributes or {}).get('isMfaRegistered') is False
-        ]
+        privileged_no_mfa = []
+        mfa_data_inconsistent = []
+        for u in ad_users:
+            attrs = u.attributes or {}
+            if attrs.get('isPrivileged') is not True or attrs.get('isMfaRegistered') is not False:
+                continue
+            name = attrs.get('displayName') or attrs.get('sAMAccountName') or u.distinguished_name
+            live_lookup_failed = attrs.get('authMethodLookupFailed')
+            live_tier = attrs.get('weakestAuthMethodTier')
+            live_details = attrs.get('authMethodDetails') or []
+            # A live signal exists (the lookup itself didn't fail) and shows
+            # a REAL registered method beyond just "Password" — this
+            # directly contradicts the report saying "no MFA registered".
+            live_shows_real_mfa = (not live_lookup_failed) and (
+                live_tier is not None or any(d != 'Password' for d in live_details)
+            )
+            if live_shows_real_mfa:
+                mfa_data_inconsistent.append((name, sorted(set(live_details))))
+            else:
+                privileged_no_mfa.append(name)
+
         if privileged_no_mfa:
             findings.append({
                 'title': 'Privileged Account Without MFA',
@@ -1834,6 +1981,22 @@ class MSPReportExporter(ExporterBase):
                                    '(Conditional Access policy for Entra, or a compensating on-prem '
                                    'control). A privileged account without MFA is one of the highest-'
                                    'value targets for compromise and directly implicates IA.L2-3.5.3.',
+            })
+
+        if mfa_data_inconsistent:
+            detail = "; ".join(f"{name} (live data shows: {', '.join(methods)})" for name, methods in mfa_data_inconsistent)
+            findings.append({
+                'title': 'MFA Registration Data Inconsistent Between Sources',
+                'severity': 'Medium',
+                'description': f'The MFA registration report says these privileged accounts have no '
+                                f'MFA registered, but the more current per-user authentication method '
+                                f'data shows real methods actually registered: {detail}.',
+                'recommendation': 'These two sources disagree — the MFA registration report '
+                                   '(Reports.Read.All) is known to lag real changes, while the '
+                                   'per-user authentication method data (UserAuthenticationMethod.'
+                                   'Read.All) reflects live state. The live data is more likely '
+                                   'correct, but confirm directly in the Entra admin center before '
+                                   'relying on either signal alone for an assessment.',
             })
 
         # Stale accounts still holding privileged roles — the isStale flag
@@ -1856,6 +2019,105 @@ class MSPReportExporter(ExporterBase):
                 'recommendation': 'Review whether these privileged accounts are still needed. If not, '
                                    'disable or remove them. If needed but inactive, confirm the account '
                                    'is not orphaned from a departed employee or unused service account.',
+            })
+
+        # PILOT FINDING (real, confirmed via external review): this project
+        # was already collecting privilegedRoles per user (specifically to
+        # satisfy IA.L2-3.5.3's "privileged accounts are identified"
+        # objective) but never checked whether the AGGREGATE number of
+        # Global Administrators was itself a real finding — confirmed
+        # directly against the CMMC Level 2 Assessment Guide's own text
+        # for AC.L2-3.1.5 (Least Privilege): objective [b] "access to
+        # privileged accounts is authorized in accordance with the
+        # principle of least privilege." A large fraction of the user
+        # population holding the tenant's single highest-privilege role is
+        # a direct least-privilege concern, independent of whether each
+        # individual account also has MFA (already checked separately
+        # above). Threshold is Microsoft's own stated guidance (generally
+        # fewer than 5, 2-4 for a tenant this size) — kept as a clear,
+        # round, defensible number rather than a precise percentage that
+        # would imply false precision.
+        global_admins = [
+            (u.attributes or {}).get('displayName') or (u.attributes or {}).get('sAMAccountName') or u.distinguished_name
+            for u in ad_users
+            if 'Global Administrator' in ((u.attributes or {}).get('privilegedRoles') or [])
+        ]
+        total_users = len(ad_users)
+        if len(global_admins) >= 5 or (total_users > 0 and len(global_admins) / total_users > 0.5):
+            findings.append({
+                'title': 'Excessive Global Administrator Assignments',
+                'severity': 'High',
+                'description': f'{len(global_admins)} of {total_users} user(s) hold Global '
+                                f'Administrator: {", ".join(global_admins)}.',
+                'recommendation': 'Microsoft recommends fewer than 5 Global Administrators, '
+                                   'generally 2-4 for a tenant this size. Review whether each of '
+                                   'these accounts genuinely needs the highest privilege level in '
+                                   'the tenant, or whether a narrower built-in role (e.g. User '
+                                   'Administrator, Security Administrator) would satisfy their '
+                                   'actual job function — this directly implicates AC.L2-3.1.5 '
+                                   '(Least Privilege).',
+            })
+
+        # Role stacking: Global Administrator already subsumes every other
+        # role, so holding it alongside additional NAMED roles is
+        # individually redundant and worth flagging on its own — a real,
+        # common finding independent of the aggregate count above.
+        for u in ad_users:
+            attrs = u.attributes or {}
+            roles = attrs.get('privilegedRoles') or []
+            if 'Global Administrator' in roles and len(roles) > 1:
+                other_roles = [r for r in roles if r != 'Global Administrator']
+                name = attrs.get('displayName') or attrs.get('sAMAccountName') or u.distinguished_name
+                findings.append({
+                    'title': 'Redundant Role Stacking on Global Administrator Account',
+                    'severity': 'Medium',
+                    'description': f'{name} holds Global Administrator alongside '
+                                    f'{len(other_roles)} additional role(s) it already subsumes: '
+                                    f'{", ".join(other_roles)}.',
+                    'recommendation': 'Global Administrator already grants every privilege the '
+                                       'additional listed role(s) would provide. Consider removing '
+                                       'the redundant role assignments to simplify access review, '
+                                       'or — better — reconsider whether this account needs Global '
+                                       'Administrator at all given its narrower, named '
+                                       'responsibilities (AC.L2-3.1.5).',
+                })
+
+        # PILOT FINDING (real, confirmed via external review): a real
+        # tenant showed the SAME person appearing twice in Entra — once as
+        # a normal Member account, once as a separate B2B Guest "shadow"
+        # account (a known Entra behavior, e.g. a self-service B2B invite
+        # or a personal Microsoft account linkage). This inflates identity
+        # counts and can skew ad_security scoring, since the tool has no
+        # way to know these are the same person rather than two genuinely
+        # different individuals who happen to share a name. Flagged, never
+        # silently merged — merging identity records is a real, separate
+        # decision this tool should not make unilaterally.
+        member_names = {
+            ((u.attributes or {}).get('displayName') or '').strip().lower()
+            for u in ad_users if not (u.attributes or {}).get('isGuest')
+        }
+        member_names.discard('')
+        possible_guest_dupes = sorted({
+            (u.attributes or {}).get('displayName')
+            for u in ad_users
+            if (u.attributes or {}).get('isGuest')
+            and ((u.attributes or {}).get('displayName') or '').strip().lower() in member_names
+        })
+        if possible_guest_dupes:
+            findings.append({
+                'title': 'Possible Duplicate Identity (Member + Guest)',
+                'severity': 'Medium',
+                'description': f'The following name(s) appear as BOTH a Member account and a '
+                                f'separate Guest account: {", ".join(possible_guest_dupes)}. This '
+                                f'is a known Entra pattern (e.g. a B2B self-invite or personal '
+                                f'Microsoft account linkage) and may represent the same person '
+                                f'counted twice.',
+                'recommendation': 'Review whether these are genuinely the same individual. If so, '
+                                   'this inflates the identity count shown elsewhere in this report '
+                                   'and may skew AD/identity scoring — consider removing the '
+                                   'redundant Guest account if it serves no distinct purpose. If '
+                                   'these are actually two different people who share a name, no '
+                                   'action is needed.',
             })
 
         # Enterprise applications (service principals) holding a
@@ -1989,10 +2251,66 @@ class MSPReportExporter(ExporterBase):
         # Grouped by policy_type instead of one flat list, so a report
         # doesn't mix e.g. password-policy failures with two dozen individual
         # audit subcategories in a single unreadable blob.
+        #
+        # PILOT FINDING (real, confirmed via external review): Conditional
+        # Access policies need special handling that the generic loop below
+        # can't provide. Microsoft ships several CA policy TEMPLATES
+        # disabled by default (their own baseline suggestions) — a tenant
+        # that built its own, differently-named custom policies covering
+        # the same intent (MFA, blocking legacy auth) correctly leaves
+        # those templates disabled, but the generic "any disabled CA
+        # policy is a High-severity gap" logic flagged them anyway. That's
+        # confidently wrong on a control an assessor cares about, in a way
+        # the client can immediately disprove by pointing at their own
+        # working, enabled policies — the worst class of finding to ship.
+        # True semantic intent-matching across differently-named policies
+        # is genuinely hard and NOT attempted here. Instead: if a disabled
+        # policy's name matches one of Microsoft's known, commonly-shipped
+        # template names, AND the tenant has at least one OTHER enabled CA
+        # policy (real evidence a working custom program exists), this is
+        # downgraded to an informational note rather than counted as a
+        # genuine gap. Any other disabled CA policy (custom-named, or a
+        # known template with NO enabled policies at all) is still flagged
+        # as a real finding — this only suppresses the specific, confirmed
+        # false-positive pattern, not disabled CA policies generally.
+        _KNOWN_DISABLED_BY_DEFAULT_CA_TEMPLATES = {
+            "Require multifactor authentication for admins",
+            "Require multifactor authentication for all users",
+            "Block legacy authentication",
+            "Require multifactor authentication for Azure management",
+        }
+        ca_policies = [p for p in artifacts.policies if p.policy_type == 'Conditional Access']
+        has_enabled_ca_policy = any(ComplianceScorer._policy_passes(p) is True for p in ca_policies)
+        ca_template_notes: List[str] = []
+
         failing_by_type: Dict[str, List[str]] = {}
         for p in artifacts.policies:
-            if ComplianceScorer._policy_passes(p) is False:
-                failing_by_type.setdefault(p.policy_type, []).append(p.policy_name)
+            if ComplianceScorer._policy_passes(p) is not False:
+                continue
+            if (p.policy_type == 'Conditional Access'
+                    and p.policy_name in _KNOWN_DISABLED_BY_DEFAULT_CA_TEMPLATES
+                    and has_enabled_ca_policy):
+                ca_template_notes.append(p.policy_name)
+                continue
+            failing_by_type.setdefault(p.policy_type, []).append(p.policy_name)
+
+        if ca_template_notes:
+            findings.append({
+                'title': 'Microsoft Default Conditional Access Template(s) Disabled',
+                'severity': 'Informational',
+                'description': (f'The following Microsoft-shipped, disabled-by-default '
+                                 f'Conditional Access templates are disabled: '
+                                 f'{", ".join(ca_template_notes)}. This tenant has at least '
+                                 f'one other Conditional Access policy actually enabled, '
+                                 f'which may already cover the same intent under a '
+                                 f'different name.'),
+                'recommendation': ('Confirm your enabled Conditional Access polic(ies) genuinely '
+                                    'cover the same intent as each disabled template listed here '
+                                    '(MFA for admins/all users, blocking legacy authentication, or '
+                                    'MFA for Azure management, respectively). If so, no action is '
+                                    'needed — leaving Microsoft\'s own template disabled in favor of '
+                                    'a working custom policy is correct configuration, not a gap.'),
+            })
 
         type_config = {
             'Local Security Policy': (
