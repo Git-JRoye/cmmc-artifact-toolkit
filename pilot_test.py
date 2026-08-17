@@ -8,11 +8,21 @@ resolves client secrets. Swap in a real vault/secret-store lookup before
 this touches an actual client.
 
 Usage:
-    Fill in ONPREM_PROFILE and/or CLOUD_PROFILE below with your test
-    environment's real details, set the corresponding secret as an
-    environment variable, then run:
+    Fill in ONPREM_PROFILE below with your test environment's real details
+    if needed (the hostname/display name here aren't sensitive). For
+    CLOUD_PROFILE, set the three environment variables below instead of
+    editing source — tenant_id/client_id are real Azure AD identifiers for
+    your own tenant and don't belong in version control even though they
+    aren't secrets on their own:
 
+        $env:PILOT_CLOUD_TENANT_ID = "your-entra-tenant-guid"
+        $env:PILOT_CLOUD_CLIENT_ID = "your-app-registration-client-id"
+        $env:TENGUARD_GRAPH_CLIENT_SECRET = "the real secret value"
         python pilot_test.py
+
+    Leave PILOT_CLOUD_TENANT_ID/PILOT_CLOUD_CLIENT_ID unset to skip the
+    cloud plane for this pilot run — CLOUD_PROFILE becomes None rather than
+    failing, same as if you'd commented it out.
 
 Set CMMC_DEMO=1 first if you want to sanity-check the harness itself runs
 end-to-end before pointing it at anything real:
@@ -78,16 +88,24 @@ ONPREM_PROFILE = TenantProfile(
     planes=[Plane.ONPREM],
 )
 
-CLOUD_PROFILE = TenantProfile(
-    tenant_key="tenguard",
-    display_name="Tenguard Security",
-    national_cloud=NationalCloud.COMMERCIAL,
-    planes=[Plane.CLOUD],
-    auth_method=AuthMethod.APP_REGISTRATION,
-    tenant_id="9f67a082-b275-4e67-9dc5-b1f6f12e7b99",
-    client_id="f598a875-1229-4635-b523-8ec93aa6c7a3",
-    secret_ref="TENGUARD_GRAPH_CLIENT_SECRET",
-)
+_pilot_tenant_id = os.environ.get("PILOT_CLOUD_TENANT_ID")
+_pilot_client_id = os.environ.get("PILOT_CLOUD_CLIENT_ID")
+
+if _pilot_tenant_id and _pilot_client_id:
+    CLOUD_PROFILE = TenantProfile(
+        tenant_key="tenguard",
+        display_name="Tenguard Security",
+        national_cloud=NationalCloud.COMMERCIAL,
+        planes=[Plane.CLOUD],
+        auth_method=AuthMethod.APP_REGISTRATION,
+        tenant_id=_pilot_tenant_id,
+        client_id=_pilot_client_id,
+        secret_ref="TENGUARD_GRAPH_CLIENT_SECRET",
+    )
+else:
+    # Not hardcoded here on purpose (see module docstring) — set
+    # PILOT_CLOUD_TENANT_ID / PILOT_CLOUD_CLIENT_ID to exercise this plane.
+    CLOUD_PROFILE = None
 
 
 def summarize(result):
@@ -149,7 +167,8 @@ def main():
 
     if not profiles:
         print("No profiles configured. Either set CMMC_DEMO=1 to test the "
-              "on-prem harness path, or fill in ONPREM_PROFILE/CLOUD_PROFILE above.")
+              "on-prem harness path, fill in ONPREM_PROFILE above, or set "
+              "PILOT_CLOUD_TENANT_ID/PILOT_CLOUD_CLIENT_ID for the cloud plane.")
         return
 
     orchestrator = TenantOrchestrator(secret_resolver=pilot_secret_resolver, demo=demo)

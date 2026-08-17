@@ -1,9 +1,10 @@
 """General-purpose assessment runner.
 
-Unlike pilot_test.py (which hardcodes ONE pilot environment directly in
-Python source, by design, for initial validation only), this script reads
-tenant configuration from a YAML file — see tenants.example.yaml for the
-format. Nothing about this file is specific to any one business; every
+Unlike pilot_test.py (a single hardcoded ONPREM_PROFILE in Python source,
+by design, for initial validation only — its cloud tenant_id/client_id
+still come from environment variables, never from source), this script
+reads tenant configuration from a YAML file — see tenants.example.yaml for
+the format. Nothing about this file is specific to any one business; every
 real client's identifiers live in your own tenants.yaml (gitignored), never
 in this codebase.
 
