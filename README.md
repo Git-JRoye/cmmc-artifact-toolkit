@@ -17,11 +17,12 @@ This project is under active restructuring. Be precise about what's real:
 
 Component	Status
 On-prem endpoint collector (OS, patches, Defender, firewall, installed software)	✅ Real — PowerShell-backed, live data
-Entra ID identity collector (users, groups, guests, stale accounts, MFA, privileged roles, group membership)	✅ Real — Microsoft Graph
-Enterprise application / service principal inventory	✅ Real — Microsoft Graph; shows a permission-grant count per app, specific permission names not yet resolved
-Intune device collector (compliance, encryption, management state, installed software, real-time Defender health, BitLocker recovery key escrow, device ownership)	✅ Real — Microsoft Graph
+Entra ID identity collector (users, groups, guests, stale accounts, MFA, privileged roles, group membership, granular per-user auth method type)	✅ Real — Microsoft Graph; auth method detail recalled against documentation, not independently verified
+Enterprise application / service principal inventory	✅ Real — Microsoft Graph; permission grants resolved to real names (e.g. `Directory.ReadWrite.All`), not just a count, with a high-privilege permission watchlist flagged separately — confirmed against a real tenant
+Intune device collector (compliance, encryption, management state, installed software, real-time Defender health, real per-device firewall status, BitLocker recovery key escrow, device ownership)	✅ Real — Microsoft Graph
 Cloud security events (Entra sign-in/directory audit logs, unified Graph Security API alerts)	✅ Real — Microsoft Graph
-Cloud policy collector (Conditional Access, Intune configuration profiles, Intune compliance policies, Windows Update Ring)	✅ Real — Microsoft Graph; on-prem and cloud evidence for the same setting (e.g. minimum password length) are scored by one identical rule
+Cloud policy collector (Conditional Access, Intune configuration profiles, Intune compliance policies, Windows Update Ring, Intune App Protection Policies for BYOD/MAM)	✅ Real — Microsoft Graph; on-prem and cloud evidence for the same setting (e.g. minimum password length) are scored by one identical rule
+Intune administrative role assignments (distinct from Entra directory roles)	✅ Real — Microsoft Graph; assigned-principal count per role, individual member names not yet resolved
 Per-tenant orchestrator (runs the right plane per client)	✅ Real
 National-cloud support (commercial / GCC / GCC High / DoD)	✅ Real for app-registration auth; GDAP and interactive auth are unimplemented seams
 On-prem AD, event log, and policy collectors (incl. time synchronization)	✅ Real — LDAP (AD) and PowerShell-backed (event log, policy); AD collector not yet run against a real domain controller
@@ -32,7 +33,7 @@ Collection Health reporting	✅ Real — every collector warning/error is captur
 SSP / POA&M generation	❌ Not started
 Exchange Online mailbox evidence (audit logging, forwarding, DKIM/DMARC)	❌ Not started — needs a separate connection mechanism from Graph
 Remote/fleet-wide on-prem collection	❌ Not started — currently only runs locally on the machine executing the script
-Remote wipe / device sanitization evidence (Media Protection domain)	❌ Not started
+Remote wipe / device sanitization evidence (Media Protection domain)	✅ Real — Microsoft Graph (`deviceManagement/auditEvents`), mapped to `MP.L1-3.8.3`; genuinely unverified against a live tenant — the least-confident endpoint in the codebase, confirm the permission and event shape before relying on it
 
 Do not use this to make a real compliance claim without a qualified reviewer. See `docs/GETTING_STARTED.md` for installation, and `CMMC-TOOL-BUILD-PLAN.md` for the phased roadmap.
 
@@ -50,10 +51,11 @@ src/cmmc_gatherer/
 │   │   └── policy_collector.py
 │   └── cloud/                     # Entra ID / Intune plane
 │       ├── entra_identity_collector.py
-│       ├── service_principal_collector.py   # enterprise app / service principal inventory
-│       ├── intune_device_collector.py       # + BitLocker escrow, real-time Defender health, ownership
-│       ├── cloud_event_collector.py         # sign-in/audit logs + Graph Security API alerts
-│       └── cloud_policy_collector.py        # Conditional Access, Intune config/compliance policies, Update Ring
+│       ├── service_principal_collector.py   # enterprise app / service principal inventory + permission names
+│       ├── intune_device_collector.py       # + BitLocker escrow, real-time Defender health, firewall status, ownership
+│       ├── intune_rbac_collector.py         # Intune administrative role assignments
+│       ├── cloud_event_collector.py         # sign-in/audit logs + Graph Security API alerts + device sanitization events
+│       └── cloud_policy_collector.py        # Conditional Access, Intune config/compliance policies, Update Ring, App Protection Policy
 ├── cloud/
 │   ├── cloud_config.py            # national-cloud registry + TenantProfile
 │   └── graph.py                   # Graph auth providers + paged client

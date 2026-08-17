@@ -218,8 +218,9 @@ every main report.
 ## 6. Known limitations (as of this writing)
 
 Everything in `USER_GUIDE_SINGLE_ORG.md` §7 applies here too — including
-enterprise app permission names not yet resolved (count only), no
-Exchange Online mailbox evidence, no remote wipe/Media Protection
+Intune administrative role assignments showing a count rather than
+individual member names, device sanitization/remote-wipe evidence being
+genuinely unverified against a live tenant, no Exchange Online mailbox
 evidence, and no fuller Defender for Endpoint integration. Additionally,
 at MSP scale specifically:
 
@@ -242,6 +243,9 @@ at MSP scale specifically:
 ---
 
 *Last updated: covers everything through Collection Health, enterprise
-app inventory, security alerts, real-time Defender health, BitLocker
-escrow, and device ownership type. Add to this section as new features
-land — don't let this drift from what the tool actually does.*
+app inventory with resolved permission names, security alerts, real-time
+Defender health, real per-device cloud firewall status, BitLocker escrow,
+device ownership type, granular auth method type, Intune App Protection
+Policy, Intune RBAC role assignments, and device sanitization events. Add
+to this section as new features land — don't let this drift from what the
+tool actually does.*

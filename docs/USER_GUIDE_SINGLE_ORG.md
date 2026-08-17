@@ -114,14 +114,17 @@ permissions, then **Grant admin consent**:
 | `User.Read.All` | Entra user inventory |
 | `Group.Read.All` | Entra group inventory |
 | `AuditLog.Read.All` | MFA registration status, sign-in/audit logs, stale-account detection |
-| `DeviceManagementManagedDevices.Read.All` | Intune device inventory, installed software, real-time Defender health |
+| `DeviceManagementManagedDevices.Read.All` | Intune device inventory, installed software, real-time Defender health, real per-device firewall status; also expected (unverified) to cover device sanitization events |
 | `RoleManagement.Read.Directory` | Privileged role membership |
 | `Reports.Read.All` | MFA registration report |
 | `Policy.Read.All` | Conditional Access policies |
 | `DeviceManagementConfiguration.Read.All` | Intune configuration profiles, compliance policies, Windows Update Ring settings |
 | `BitlockerKey.ReadBasic.All` | BitLocker recovery key escrow status (existence check only — this tool never reads the key value itself; deliberately not `BitlockerKey.Read.All`) |
-| `Application.Read.All` | Enterprise application / service principal inventory |
+| `Application.Read.All` | Enterprise application / service principal inventory, including resolved permission names |
 | `SecurityAlert.Read.All` | Security alerts from the unified Microsoft Graph Security API (Defender, Sentinel if connected) |
+| `UserAuthenticationMethod.Read.All` | Granular per-user authentication method type (FIDO2, Authenticator, SMS, etc.) |
+| `DeviceManagementApps.Read.All` | Intune App Protection Policies (MAM) for personally-owned/BYOD devices |
+| `DeviceManagementRBAC.Read.All` | Intune administrative role assignments |
 
 Generate a client secret (Certificates & secrets → New client secret) and
 set it as an environment variable matching whatever `secret_ref` you put
@@ -190,27 +193,42 @@ them. The health page is the same information, permanently saved with the report
   proves it. Every badge is tagged DIRECT (textbook match) or SUPPORTING
   (real but partial evidence) — never overstated.
 - **On-Prem Endpoint Status / Cloud-Managed Devices (Intune)** — device
-  tables. The cloud table now includes: BitLocker recovery key escrow
-  status (existence check only — never the key itself), real-time
-  Windows Defender health (distinct from, and more current than, the
-  compliance-policy *requirement* check below), and device Ownership
-  (Corporate vs. Personal/BYOD) — which is also the real, structural
-  reason a device's software inventory may show "None detected": Intune
-  deliberately restricts app-inventory collection on personally-owned
-  devices for user privacy.
+  tables. The cloud table now includes: real per-device Windows Firewall
+  status (via Intune's bulk export report, not just the compliance-policy
+  *requirement*), BitLocker recovery key escrow status (existence check
+  only — never the key itself), real-time Windows Defender health
+  (distinct from, and more current than, the compliance-policy
+  *requirement* check below), and device Ownership (Corporate vs.
+  Personal/BYOD) — which is also the real, structural reason a device's
+  software inventory may show "None detected": Intune deliberately
+  restricts app-inventory collection on personally-owned devices for user
+  privacy.
 - **Active Directory / Identity Objects — Users / Groups** — on-prem AD
-  and Entra users/groups, including per-user group membership.
+  and Entra users/groups, including per-user group membership and, for
+  Entra users, a granular Auth Method Type column (FIDO2, Authenticator,
+  SMS, etc.) — supplementary detail alongside, never a replacement for,
+  the MFA Registered column (see the federated-identity caveat shown
+  directly above that table in the report itself).
 - **Enterprise Applications** — every application/service principal
   registered in the tenant (processes acting on their own identity, not
-  human users), with a permission-grant *count* per app. Specific
-  permission names aren't resolved yet (see §7).
+  human users). Each permission grant is resolved to its real name (e.g.
+  `Directory.ReadWrite.All`), not just a count, with a small
+  high-privilege permission watchlist flagged separately.
+- **Intune Administrative Roles** — who holds administrative access to
+  Intune device management itself, distinct from Entra directory roles
+  (Global Admin, etc.) shown in the Users table above — someone can hold
+  no Entra admin role at all and still have full control over every
+  managed device via an Intune-specific role assignment. Assigned
+  principal *count* per role; individual member names aren't resolved yet.
 - **Findings & Recommendations** — every finding cites the specific CMMC
   practice it relates to where applicable.
 - **Policy Compliance** — on-prem Local Security Policy/UAC/audit policy,
   Entra Conditional Access, and Intune configuration profiles,
   compliance policies (password/encryption/firewall/Defender
-  *requirements*), and Windows Update Ring (patch deferral, automatic
-  install). On-prem and cloud evidence for the *same* real-world setting
+  *requirements*), Windows Update Ring (patch deferral, automatic
+  install), and Intune App Protection Policies (MAM) — the primary
+  control for corporate data on personally-owned/BYOD devices that aren't
+  fully Intune-managed. On-prem and cloud evidence for the *same* real-world setting
   (e.g. minimum password length) appear together in this one table,
   scored by the identical rule regardless of source.
 - **Installed Software Inventory** — summarized here with a link to the
@@ -308,15 +326,23 @@ defend — this tool only ever applies exactly what you declare.
   unit-tested, but not yet proven on a real hybrid client running as a
   single profile — see `USER_GUIDE_MSP.md` for the hybrid config that
   would actually exercise it.
-- **Enterprise Applications shows a permission-grant *count* per app, not
-  the specific permission names** — resolving those requires an
-  additional lookup this tool doesn't do yet.
-- **Vulnerability scanning is not integrated**, and there's no per-device
-  firewall/antivirus *state* for cloud-only devices (only the compliance-
-  policy *requirement* and real-time Defender health) — a fuller
-  Defender for Endpoint integration is a real, deferred next step.
+- **Vulnerability scanning is not integrated** — a fuller Defender for
+  Endpoint integration, beyond the real-time protection health,
+  signature-freshness, and per-device firewall status already collected,
+  is a real, deferred next step.
 - **Remote wipe / device sanitization evidence (Media Protection domain)
-  is not collected** — real CMMC relevance (`MP.L1-3.8.3`), not yet built.
+  is collected** (`deviceManagement/auditEvents`, mapped to
+  `MP.L1-3.8.3`) but is genuinely unverified against a live tenant — it's
+  the least-confident endpoint in the codebase. If it 403s, the
+  `_health.html` collection health log will show the real permission
+  Graph is asking for.
+- **Intune administrative role assignments show assigned-principal
+  *count* per role, not individual member names** — resolving those
+  requires an additional lookup this tool doesn't do yet.
+- **Granular auth method type and Intune App Protection Policy fields are
+  recalled against Microsoft's documentation, not independently verified
+  against a live tenant** — same caveat class as the sanitization events
+  above; check `_health.html` if either comes back empty or errors.
 - **Exchange Online mailbox security settings** (audit logging, external
   forwarding rules, DKIM/DMARC) are not collected — this needs a separate
   connection mechanism from the Graph client everything else uses, and is
@@ -328,6 +354,9 @@ defend — this tool only ever applies exactly what you declare.
 ---
 
 *Last updated: covers everything through Collection Health, enterprise
-app inventory, security alerts, real-time Defender health, BitLocker
-escrow, and device ownership type. Add to this section as new features
-land — don't let this drift from what the tool actually does.*
+app inventory with resolved permission names, security alerts, real-time
+Defender health, real per-device cloud firewall status, BitLocker escrow,
+device ownership type, granular auth method type, Intune App Protection
+Policy, Intune RBAC role assignments, and device sanitization events. Add
+to this section as new features land — don't let this drift from what the
+tool actually does.*
