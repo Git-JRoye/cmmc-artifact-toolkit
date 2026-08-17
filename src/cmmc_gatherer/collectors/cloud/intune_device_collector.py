@@ -83,24 +83,22 @@ Graph application permissions required:
   BitLockerKey.ReadBasic.All (NEW — metadata-only recovery key existence
   check; deliberately NOT BitLockerKey.Read.All, see constraint above)
 
-HONEST CONFIDENCE NOTE on Microsoft Defender for Endpoint (MDE) device
-health (_collect_mde_health): this is a new, genuinely unverified addition,
-same "try the bulk export-job report first" approach that worked for
-firewall status. Two distinct layers of uncertainty here, not just one:
-report NAME ("DefenderAgentHealthStatus" is a best guess, not confirmed —
-if wrong, Graph's own 400 response body is expected to name the actual
-valid report(s), the same way every other wrong-guess endpoint in this
-project has been corrected from real error text rather than another
-guess), and COLUMN names within that report (genuinely unknown, so no
-$select is passed for this one — letting the report return its own
-default columns and reading several plausible candidate names per field,
-rather than compounding two guesses into one request that can fail for
-either reason with no way to tell which). Required permission is assumed,
-not confirmed, to be covered by DeviceManagementManagedDevices.Read.All
-already required above — MDE device risk/exposure data more commonly
-lives under Microsoft Defender for Endpoint's own Machine.Read.All scope
-in other integration patterns, so a permission-specific error here is a
-real, expected possible outcome, not evidence the report name is wrong.
+HONEST CONFIDENCE NOTE on Microsoft Defender agent/antivirus status
+(_collect_defender_agent_status): report name "DefenderAgentHealthStatus"
+was an unconfirmed guess in an earlier version of this file and was
+confirmed WRONG by a real 400 ("PostExportJobAsync not supported for
+reportType Unknown") — checked against Microsoft's full published list of
+150+ valid reportName values, it isn't one of them. The real report is
+"DefenderAgents" (Reports > MicrosoftDefender > Agent Status in the admin
+center), and that same Microsoft reference publishes its column list —
+DeviceState, MalwareProtectionEnabled, NetworkInspectionSystemEnabled,
+ProductStatus, RealTimeProtectionEnabled, SignatureUpdateOverdue,
+TamperProtectionEnabled — used directly in
+_DEFENDER_AGENT_COLUMN_CANDIDATES, not guessed. Required permission is
+assumed, not confirmed, to be covered by
+DeviceManagementManagedDevices.Read.All already required above — if this
+403s instead, that's a real, expected possible outcome, not evidence the
+report name is wrong.
 
 Also genuinely possible: an empty or partial result here may reflect a
 tenant that hasn't connected Microsoft Defender for Endpoint to Intune at
@@ -170,18 +168,18 @@ class IntuneDeviceCollector(CollectorBase):
         # above — one export report call for the whole tenant, never a
         # per-device fan-out, and a failure here must never take down the
         # main device list.
-        mde_health: Dict[str, Dict[str, Optional[str]]] = {}
-        mde_health_lookup_failed = False
+        defender_agent_status: Dict[str, Dict[str, Optional[str]]] = {}
+        defender_agent_lookup_failed = False
         try:
-            mde_health = self._collect_mde_health()
+            defender_agent_status = self._collect_defender_agent_status()
         except Exception as e:
-            mde_health_lookup_failed = True
+            defender_agent_lookup_failed = True
             detail = getattr(getattr(e, "response", None), "text", None)
             if detail:
-                logger.warning("  Could not fetch bulk MDE device health report: %s | Response: %s",
+                logger.warning("  Could not fetch bulk Defender agent status report: %s | Response: %s",
                                 e, detail[:500])
             else:
-                logger.warning("  Could not fetch bulk MDE device health report: %s", e)
+                logger.warning("  Could not fetch bulk Defender agent status report: %s", e)
 
         try:
             for d in self.graph.get_all("deviceManagement/managedDevices", params=params):
@@ -224,19 +222,23 @@ class IntuneDeviceCollector(CollectorBase):
                 ep.metadata["cloud_firewall_status"] = firewall_statuses.get((ep.hostname or "").upper())
                 ep.metadata["cloud_firewall_lookup_failed"] = firewall_lookup_failed
 
-                # Microsoft Defender for Endpoint device health, same bulk
+                # Microsoft Defender agent/antivirus status (DefenderAgents
+                # report — see _collect_defender_agent_status), same bulk
                 # export + hostname join as firewall status above. A device
                 # with no entry (whole export failed, or this device isn't
                 # onboarded to MDE at all) reads as None for every field —
-                # never guessed at — with mde_health_lookup_failed telling
+                # never guessed at — with mde_agent_lookup_failed telling
                 # the caller WHY: a real lookup failure, versus this device
                 # simply not being present in an otherwise-successful report.
-                device_mde = mde_health.get((ep.hostname or "").upper()) or {}
-                ep.metadata["mde_sensor_health"] = device_mde.get("sensor_health")
-                ep.metadata["mde_onboarding_status"] = device_mde.get("onboarding_status")
-                ep.metadata["mde_risk_level"] = device_mde.get("risk_level")
-                ep.metadata["mde_exposure_level"] = device_mde.get("exposure_level")
-                ep.metadata["mde_health_lookup_failed"] = mde_health_lookup_failed
+                device_defender = defender_agent_status.get((ep.hostname or "").upper()) or {}
+                ep.metadata["mde_agent_device_state"] = device_defender.get("device_state")
+                ep.metadata["mde_agent_malware_protection_enabled"] = device_defender.get("malware_protection_enabled")
+                ep.metadata["mde_agent_network_inspection_enabled"] = device_defender.get("network_inspection_system_enabled")
+                ep.metadata["mde_agent_product_status"] = device_defender.get("product_status")
+                ep.metadata["mde_agent_realtime_protection_enabled"] = device_defender.get("realtime_protection_enabled")
+                ep.metadata["mde_agent_signature_update_overdue"] = device_defender.get("signature_update_overdue")
+                ep.metadata["mde_agent_tamper_protection_enabled"] = device_defender.get("tamper_protection_enabled")
+                ep.metadata["mde_agent_lookup_failed"] = defender_agent_lookup_failed
 
                 out.append(ep)
         except Exception as e:
@@ -280,95 +282,139 @@ class IntuneDeviceCollector(CollectorBase):
         confidently known — reusing Microsoft's own translation avoids
         guessing at it.
 
-        HONEST CONFIDENCE NOTE: the exact export column set
-        (DeviceName, FirewallStatus, FirewallStatus_loc, _ManagedBy, UPN)
-        is recalled with moderate confidence from external review, not
-        independently verified against a live tenant as of this writing.
-        The full set of possible "_loc" values beyond "Enabled" (the only
-        one seen in real pilot data so far) is also not exhaustively
-        verified. Required Graph permissions are expected to be the same
-        DeviceManagementConfiguration.Read.All and
-        DeviceManagementManagedDevices.Read.All already required elsewhere
-        in this project — if this 403s, the real error text will say
-        what's actually missing.
+        PILOT FINDING (real, confirmed): a first version of this method
+        passed an explicit select=["DeviceName", "FirewallStatus",
+        "FirewallStatus_loc", "_ManagedBy", "UPN"] — five guessed column
+        names, none independently verified — and every call 400'd. The
+        exportJobs API is known to reject the ENTIRE request if even one
+        requested select column doesn't exist for that report, and
+        Microsoft's own reportName reference
+        (learn.microsoft.com/en-us/mem/intune/fundamentals/
+        reports-export-graph-available-reports) confirms "FirewallStatus"
+        is a real report name but does not publish its column list — so
+        there was no way to confirm all five guesses were right. Fixed by
+        dropping select entirely (matching the minimal, confirmed-working
+        payload {"reportName": "FirewallStatus", "format": "csv"} used in
+        published examples of this exact call) and reading the report's
+        own default columns via the same
+        try-several-candidate-names-per-field pattern already used in
+        _collect_defender_agent_status below, rather than guessing a
+        second time. The Intune admin center's own "Reports > Firewall"
+        page (a human-driven getCachedReport call, not this app-only
+        exportJobs one — see this method's docstring above) confirms the
+        real report has exactly four columns, displayed as "Device name",
+        "Firewall status", "Managed by", "UPN" — informing the candidate
+        names below, though the raw (non-display) column names those map
+        to in the CSV export are still not independently confirmed.
 
         Returns {hostname.upper(): status_label}. A device with no entry
         (the whole export failed, or a device simply isn't present in the
         report for some reason) must be treated as unknown by the caller
         — never silently read as a confirmed "Enabled" or "Disabled".
         """
-        rows = self._beta_graph.run_export_job(
-            report_name="FirewallStatus",
-            select=["DeviceName", "FirewallStatus", "FirewallStatus_loc", "_ManagedBy", "UPN"],
-        )
+        rows = self._beta_graph.run_export_job(report_name="FirewallStatus")
         result: Dict[str, str] = {}
+        any_matched = False
         for row in rows:
-            name = (row.get("DeviceName") or "").strip()
+            name = None
+            for name_key in self._FIREWALL_DEVICE_NAME_CANDIDATES:
+                name = (row.get(name_key) or "").strip()
+                if name:
+                    break
             if not name:
                 continue
-            status_label = row.get("FirewallStatus_loc") or row.get("FirewallStatus")
+            status_label = None
+            for column in self._FIREWALL_STATUS_CANDIDATES:
+                status_label = row.get(column)
+                if status_label not in (None, ""):
+                    any_matched = True
+                    break
+                status_label = None
             result[name.upper()] = status_label
+
+        if rows and not any_matched:
+            sample_columns = sorted(rows[0].keys())
+            logger.warning(
+                "  Firewall status report returned %d row(s) but none of the expected "
+                "status columns were found — real column names appear to be: %s. "
+                "Update _FIREWALL_STATUS_CANDIDATES to match.", len(rows), sample_columns,
+            )
         logger.info("  Firewall status (export report): %d device(s)", len(result))
         return result
 
-    # Column-name candidates per field, checked in order (a "_loc" variant
-    # first, matching FirewallStatus's precedent that the human-readable
-    # translated column is preferable to a raw code where both exist) —
-    # NOT confirmed against a live tenant. Deliberately several guesses per
-    # field rather than one, and no $select passed to the report at all
-    # (see the module docstring's HONEST CONFIDENCE NOTE on MDE health for
-    # why): an unknown report schema and an unknown report name are two
-    # separate uncertainties, and compounding them into one request would
-    # make a failure impossible to attribute to either cause.
-    _MDE_COLUMN_CANDIDATES = {
-        "sensor_health": ("SensorHealthState_loc", "SensorHealthState",
-                           "SensorDataAgentHealthState_loc", "SensorDataAgentHealthState",
-                           "AgentHealthStatus_loc", "AgentHealthStatus"),
-        "onboarding_status": ("OnboardingStatus_loc", "OnboardingStatus",
-                               "DeviceOnboardingStatus_loc", "DeviceOnboardingStatus"),
-        "risk_level": ("RiskLevel_loc", "RiskLevel", "DeviceRiskLevel_loc", "DeviceRiskLevel"),
-        "exposure_level": ("ExposureLevel_loc", "ExposureLevel", "DeviceExposureLevel_loc",
-                            "DeviceExposureLevel"),
-    }
-    _MDE_DEVICE_NAME_CANDIDATES = ("DeviceName", "ComputerDnsName", "MachineName")
+    _FIREWALL_DEVICE_NAME_CANDIDATES = ("DeviceName", "Device name", "ComputerDnsName", "MachineName")
+    _FIREWALL_STATUS_CANDIDATES = ("FirewallStatus_loc", "Firewall status", "FirewallStatus")
 
-    def _collect_mde_health(self) -> Dict[str, Dict[str, Optional[str]]]:
-        """Bulk-fetch Microsoft Defender for Endpoint (MDE) device health —
-        sensor health state, onboarding status, risk level, exposure level
-        — for every device, via the same Intune asynchronous export-report
-        API used by _collect_firewall_statuses above (see that method's own
+    # Column names for Intune's "DefenderAgents" export report (Reports >
+    # MicrosoftDefender > Agent Status in the admin center), taken directly
+    # from Microsoft's own published reportName/column reference
+    # (learn.microsoft.com/en-us/mem/intune/fundamentals/
+    # reports-export-graph-available-reports) — not guessed. That reference
+    # confirms these exact column names for this exact report, so (unlike
+    # FirewallStatus above, whose column list Microsoft doesn't publish) a
+    # single candidate per field is used rather than several guesses.
+    _DEFENDER_AGENT_COLUMN_CANDIDATES = {
+        "device_state": ("DeviceState",),
+        "malware_protection_enabled": ("MalwareProtectionEnabled",),
+        "network_inspection_system_enabled": ("NetworkInspectionSystemEnabled",),
+        "product_status": ("ProductStatus",),
+        "realtime_protection_enabled": ("RealTimeProtectionEnabled",),
+        "signature_update_overdue": ("SignatureUpdateOverdue",),
+        "tamper_protection_enabled": ("TamperProtectionEnabled",),
+    }
+    _DEFENDER_AGENT_DEVICE_NAME_CANDIDATES = ("DeviceName", "ComputerDnsName", "MachineName")
+
+    def _collect_defender_agent_status(self) -> Dict[str, Dict[str, Optional[str]]]:
+        """Bulk-fetch Microsoft Defender antivirus/agent status — device
+        state, malware protection, network inspection, product status,
+        real-time protection, signature currency, tamper protection — for
+        every device, via the same Intune asynchronous export-report API
+        used by _collect_firewall_statuses above (see that method's own
         docstring, and GraphClient.run_export_job, for the full mechanics).
         One export call for the whole tenant; never a per-device fan-out.
 
-        Report name "DefenderAgentHealthStatus" is a best guess, not
-        confirmed. If wrong, Graph's own error response is expected to name
-        the actual valid report(s) — that response body is logged by the
-        caller (collect() above) exactly so this can be corrected from real
-        error text rather than guessed a second time, matching how every
-        other wrong-endpoint-name mistake in this project has been fixed.
+        PILOT FINDING (real, confirmed): this method previously requested
+        report name "DefenderAgentHealthStatus" — a guess, explicitly
+        flagged as unconfirmed — and Graph rejected it outright with
+        "PostExportJobAsync not supported for reportType Unknown", proving
+        that report name does not exist at all. Checked against Microsoft's
+        full published list of valid reportName values (150+ entries, same
+        reference cited above): "DefenderAgentHealthStatus" is not among
+        them. The real report for Defender agent/antivirus status is named
+        "DefenderAgents" (admin center: Reports > MicrosoftDefender >
+        Agent Status), and that reference also publishes its column list —
+        used verbatim in _DEFENDER_AGENT_COLUMN_CANDIDATES above, rather
+        than guessed. Note this is a genuinely different set of fields than
+        the old sensor-health/onboarding-status/risk-level/exposure-level
+        this method previously tried to extract — those concepts don't
+        exist as columns on DefenderAgents, so callers reading the old
+        mde_sensor_health/mde_onboarding_status/mde_risk_level/
+        mde_exposure_level metadata keys (there were none in this project
+        as of this fix — verified by search) would need updating to the
+        new mde_agent_* keys set in collect() below instead.
 
-        No $select is sent, since the exact column names in this report are
-        also unconfirmed — letting the report return its own default
-        columns and reading several plausible candidate names per field
-        (see _MDE_COLUMN_CANDIDATES) keeps the report-name question and the
-        column-name question separable. If NONE of the candidate columns
-        are found in a real, non-empty response, the actual column names
-        from the first row are logged so the real schema is known instead
-        of guessed at again.
+        A single candidate is tried per field (not several, unlike the
+        firewall report above) since the column reference for this
+        specific report IS published — but if a real tenant's response
+        doesn't match, the actual column names from the first row are
+        logged so a real mismatch is corrected from real data, not
+        assumed to be impossible just because it's documented.
 
-        Returns {hostname.upper(): {"sensor_health": ..., "onboarding_status":
-        ..., "risk_level": ..., "exposure_level": ...}}. A device with no
-        entry (the whole export failed, this device isn't onboarded to MDE,
-        or the tenant has no MDE/Intune connection at all — see the module
-        docstring) must be treated as unknown by the caller, never silently
-        read as a confirmed value.
+        Returns {hostname.upper(): {"device_state": ...,
+        "malware_protection_enabled": ..., "network_inspection_system_enabled":
+        ..., "product_status": ..., "realtime_protection_enabled": ...,
+        "signature_update_overdue": ..., "tamper_protection_enabled": ...}}.
+        A device with no entry (the whole export failed, this device isn't
+        onboarded to MDE, or the tenant has no MDE/Intune connection at all
+        — see the module docstring) must be treated as unknown by the
+        caller, never silently read as a confirmed value.
         """
-        rows = self._beta_graph.run_export_job(report_name="DefenderAgentHealthStatus")
+        rows = self._beta_graph.run_export_job(report_name="DefenderAgents")
         result: Dict[str, Dict[str, Optional[str]]] = {}
         any_field_matched = False
         for row in rows:
             name = None
-            for name_key in self._MDE_DEVICE_NAME_CANDIDATES:
+            for name_key in self._DEFENDER_AGENT_DEVICE_NAME_CANDIDATES:
                 name = (row.get(name_key) or "").strip()
                 if name:
                     break
@@ -376,7 +422,7 @@ class IntuneDeviceCollector(CollectorBase):
                 continue
 
             device_result: Dict[str, Optional[str]] = {}
-            for field, candidates in self._MDE_COLUMN_CANDIDATES.items():
+            for field, candidates in self._DEFENDER_AGENT_COLUMN_CANDIDATES.items():
                 value = None
                 for column in candidates:
                     value = row.get(column)
@@ -390,11 +436,11 @@ class IntuneDeviceCollector(CollectorBase):
         if rows and not any_field_matched:
             sample_columns = sorted(rows[0].keys())
             logger.warning(
-                "  MDE health report returned %d row(s) but none of the expected "
+                "  DefenderAgents report returned %d row(s) but none of the documented "
                 "columns were found — real column names appear to be: %s. "
-                "Update _MDE_COLUMN_CANDIDATES to match.", len(rows), sample_columns,
+                "Update _DEFENDER_AGENT_COLUMN_CANDIDATES to match.", len(rows), sample_columns,
             )
-        logger.info("  MDE device health (export report): %d device(s)", len(result))
+        logger.info("  Defender agent status (export report): %d device(s)", len(result))
         return result
 
     def _check_ownership_type(self, device_id: str, hostname: str) -> Optional[str]:
