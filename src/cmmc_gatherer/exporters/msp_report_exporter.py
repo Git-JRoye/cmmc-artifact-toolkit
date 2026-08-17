@@ -445,6 +445,118 @@ class MSPReportExporter(ExporterBase):
 {coverage_notes_html}
 """
 
+        # ── Device Protection Status (combined on-prem + cloud) ─────────
+        all_eps = list(onprem_eps) + list(cloud_eps)
+        if all_eps:
+            fw_ok = 0
+            mde_ok = 0
+            rtp_ok = 0
+            device_rows = ""
+            for ep in all_eps:
+                meta = ep.metadata or {}
+                is_cloud = bool(meta.get('source') == 'intune' or meta.get('cloud_firewall_status') is not None or meta.get('management_state'))
+
+                # Firewall
+                if is_cloud:
+                    cfw = meta.get('cloud_firewall_status')
+                    if cfw == 'Enabled':
+                        fw_cell = '<span class="status-good">Enabled</span>'
+                        fw_ok += 1
+                    elif cfw == 'Disabled':
+                        fw_cell = '<span class="status-bad">Disabled</span>'
+                    elif cfw:
+                        fw_cell = f'<span class="status-warn">{cfw}</span>'
+                    else:
+                        fw_cell = '<span class="na">N/A</span>'
+                else:
+                    if ep.firewall_status == 'Enabled':
+                        fw_cell = '<span class="status-good">Enabled</span>'
+                        fw_ok += 1
+                    elif ep.firewall_status == 'Partial':
+                        fw_cell = '<span class="status-warn">Partial</span>'
+                    elif ep.firewall_status:
+                        fw_cell = f'<span class="status-bad">{ep.firewall_status}</span>'
+                    else:
+                        fw_cell = '<span class="na">N/A</span>'
+
+                # MDE onboarding
+                mde_status = meta.get('mde_atp_onboarding_status')
+                if mde_status and mde_status.lower() in ('onboarded', 'sufficient'):
+                    mde_cell = '<span class="status-good">Onboarded</span>'
+                    mde_ok += 1
+                elif mde_status:
+                    mde_cell = f'<span class="status-bad">{mde_status}</span>'
+                else:
+                    # Check intune sub-metadata for merged devices
+                    intune_meta = meta.get('intune', {})
+                    mde_intune = intune_meta.get('mde_atp_onboarding_status') if isinstance(intune_meta, dict) else None
+                    if mde_intune and mde_intune.lower() in ('onboarded', 'sufficient'):
+                        mde_cell = '<span class="status-good">Onboarded</span>'
+                        mde_ok += 1
+                    elif mde_intune:
+                        mde_cell = f'<span class="status-bad">{mde_intune}</span>'
+                    else:
+                        mde_cell = '<span class="na">N/A</span>'
+
+                # Real-time protection
+                if is_cloud:
+                    rtp_val = meta.get('defender_realtime_protection_enabled')
+                    if rtp_val is True:
+                        rtp_cell = '<span class="status-good">Active</span>'
+                        rtp_ok += 1
+                    elif rtp_val is False:
+                        rtp_cell = '<span class="status-bad">Inactive</span>'
+                    else:
+                        rtp_cell = '<span class="na">N/A</span>'
+                else:
+                    if ep.antivirus_status == 'Active':
+                        rtp_cell = '<span class="status-good">Active</span>'
+                        rtp_ok += 1
+                    elif ep.antivirus_status:
+                        rtp_cell = f'<span class="status-bad">{ep.antivirus_status}</span>'
+                    else:
+                        rtp_cell = '<span class="na">N/A</span>'
+
+                device_rows += (
+                    f"                <tr><td>{ep.hostname}</td>"
+                    f"<td>{fw_cell}</td>"
+                    f"<td>{mde_cell}</td>"
+                    f"<td>{rtp_cell}</td></tr>\n"
+                )
+
+            total = len(all_eps)
+            html += f"""        <div class="section" id="sec-device-protection">
+            <h2>Device Protection Status</h2>
+            <p style="margin-bottom:12px;color:#64748b;font-size:0.95em;">
+                Combined view of all endpoints (on-prem + cloud-managed).
+                Maps to CMMC controls:
+                <strong>SC.L1-3.13.1</strong> (boundary protection),
+                <strong>SI.L1-3.14.2</strong> (malicious code protection),
+                <strong>SI.L2-3.14.3</strong> (security alerts &amp; advisories).
+            </p>
+            <div style="display:flex;gap:16px;margin-bottom:18px;flex-wrap:wrap;">
+                <div style="background:#e8f5e9;border-radius:8px;padding:16px 28px;text-align:center;min-width:180px;">
+                    <div style="font-size:1.5em;font-weight:700;color:#2f7d4f;">{fw_ok}/{total}</div>
+                    <div style="font-size:0.92em;color:#2f7d4f;margin-top:4px;">Firewall Enabled</div>
+                </div>
+                <div style="background:#e8f5e9;border-radius:8px;padding:16px 28px;text-align:center;min-width:180px;">
+                    <div style="font-size:1.5em;font-weight:700;color:#2f7d4f;">{mde_ok}/{total}</div>
+                    <div style="font-size:0.92em;color:#2f7d4f;margin-top:4px;">MDE Onboarded</div>
+                </div>
+                <div style="background:#e8f5e9;border-radius:8px;padding:16px 28px;text-align:center;min-width:180px;">
+                    <div style="font-size:1.5em;font-weight:700;color:#2f7d4f;">{rtp_ok}/{total}</div>
+                    <div style="font-size:0.92em;color:#2f7d4f;margin-top:4px;">Real-Time Protection Active</div>
+                </div>
+            </div>
+            <table>
+                <tr>
+                    <th>Hostname</th><th>Firewall</th>
+                    <th>MDE (Endpoint Detection)</th><th>Real-Time Protection</th>
+                </tr>
+{device_rows}            </table>
+        </div>
+"""
+
         if onprem_eps:
             html += f"""        <div class="section" id="sec-onprem-endpoints">
             <h2>On-Prem Endpoint Status</h2>
