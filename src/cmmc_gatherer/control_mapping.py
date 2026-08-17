@@ -459,6 +459,64 @@ EVIDENCE_MAP: List[EvidenceMapping] = [
 
 _EVIDENCE_BY_KEY: Dict[str, EvidenceMapping] = {e.evidence_key: e for e in EVIDENCE_MAP}
 
+# ── Policy-to-CMMC-practice mapping ──────────────────────────────────────
+#
+# Maps individual policies (by policy_name first, then by policy_type as a
+# fallback) to the CMMC practice(s) they satisfy or support. Used by the
+# report exporter to show a "CMMC Controls" column in the policy table and
+# to filter out policies with no CMMC relevance.
+#
+# A policy can map to multiple practices (e.g. MinimumPasswordLength
+# supports both IA.L2-3.5.7 and CM.L2-3.4.2). The mapping includes the
+# confidence level so the report can distinguish "satisfies" from
+# "supports".
+
+# By policy_name (most specific — checked first)
+_POLICY_NAME_TO_CONTROLS: Dict[str, List[tuple]] = {
+    # Password & account policies
+    "MinimumPasswordLength": [("IA.L2-3.5.7", Confidence.DIRECT), ("CM.L2-3.4.2", Confidence.SUPPORTING)],
+    "PasswordComplexity": [("IA.L2-3.5.7", Confidence.DIRECT), ("CM.L2-3.4.2", Confidence.SUPPORTING)],
+    "PasswordHistorySize": [("IA.L2-3.5.8", Confidence.DIRECT), ("CM.L2-3.4.2", Confidence.SUPPORTING)],
+    "LockoutBadCount": [("AC.L2-3.1.8", Confidence.DIRECT), ("CM.L2-3.4.2", Confidence.SUPPORTING)],
+    "LockoutDuration": [("AC.L2-3.1.8", Confidence.SUPPORTING)],
+    "ResetLockoutCount": [("AC.L2-3.1.8", Confidence.SUPPORTING)],
+    "MaximumPasswordAge": [("IA.L2-3.5.7", Confidence.SUPPORTING)],
+    "MinimumPasswordAge": [("IA.L2-3.5.7", Confidence.SUPPORTING)],
+    "ClearTextPassword": [("IA.L2-3.5.7", Confidence.SUPPORTING), ("SC.L2-3.13.16", Confidence.SUPPORTING)],
+    # Intune compliance policy requirements
+    "StorageRequireEncryption": [("SC.L2-3.13.16", Confidence.SUPPORTING)],
+    "ActiveFirewallRequired": [("SC.L1-3.13.1", Confidence.SUPPORTING)],
+    "DefenderEnabled": [("SI.L1-3.14.2", Confidence.SUPPORTING)],
+    "RealTimeProtectionRequired": [("SI.L1-3.14.2", Confidence.SUPPORTING)],
+}
+
+# By policy_type (fallback — used when policy_name isn't in the map above)
+_POLICY_TYPE_TO_CONTROLS: Dict[str, List[tuple]] = {
+    "UAC (Local Policy)": [("CM.L2-3.4.2", Confidence.DIRECT)],
+    "Local Security Policy": [("CM.L2-3.4.2", Confidence.SUPPORTING)],
+    "Audit Policy": [("AU.L2-3.3.1", Confidence.DIRECT)],
+    "Group Policy": [("CM.L2-3.4.2", Confidence.SUPPORTING)],
+    "Conditional Access": [("IA.L2-3.5.3", Confidence.DIRECT), ("AC.L1-3.1.1", Confidence.SUPPORTING)],
+    "Intune Configuration Profile": [("CM.L2-3.4.2", Confidence.DIRECT)],
+    "Intune Compliance Policy": [("CM.L2-3.4.2", Confidence.SUPPORTING)],
+    "Intune Update Ring": [("SI.L1-3.14.1", Confidence.DIRECT)],
+    "Intune App Protection Policy": [("AC.L1-3.1.1", Confidence.SUPPORTING)],
+    "Time Synchronization": [("AU.L2-3.3.7", Confidence.DIRECT)],
+}
+
+
+def controls_for_policy(policy_name: str, policy_type: str) -> List[tuple]:
+    """Return [(practice_id, confidence), ...] for a given policy.
+
+    Checks by policy_name first (most specific), then falls back to
+    policy_type. Returns an empty list if the policy has no CMMC mapping
+    — the caller can use this to filter out unmapped policies.
+    """
+    result = _POLICY_NAME_TO_CONTROLS.get(policy_name)
+    if result:
+        return result
+    return _POLICY_TYPE_TO_CONTROLS.get(policy_type, [])
+
 # Catch a typo'd or forgotten practice_id at IMPORT time, not at report-render
 # time. Without this, a bad practice_id in a new EvidenceMapping entry surfaces
 # as a bare KeyError deep inside practices_for_evidence/domain_coverage, only

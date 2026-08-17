@@ -213,10 +213,12 @@ class MSPReportExporter(ExporterBase):
             software_path = f"{base}_software{ext}"
             health_path = f"{base}_health{ext}"
             apps_path = f"{base}_apps{ext}"
+            policies_path = f"{base}_policies{ext}"
             main_filename = os.path.basename(output_path)
             software_filename = os.path.basename(software_path)
             health_filename = os.path.basename(health_path)
             apps_filename = os.path.basename(apps_path)
+            policies_filename = os.path.basename(policies_path)
 
             onprem_eps = self._onprem_endpoints(artifacts)
             cloud_eps = self._cloud_endpoints(artifacts)
@@ -226,6 +228,7 @@ class MSPReportExporter(ExporterBase):
             has_apps = bool(self._service_principals(artifacts))
             health_log = health_log or []
 
+            has_policies = bool(artifacts.policies)
             html_content = self._generate_msp_report(
                 artifacts, customer_name, assessment_id,
                 software_href=software_filename if has_software else None,
@@ -233,6 +236,7 @@ class MSPReportExporter(ExporterBase):
                 health_log=health_log,
                 health_href=health_filename,
                 apps_href=apps_filename if has_apps else None,
+                policies_href=policies_filename if has_policies else None,
             )
             # Explicit UTF-8 write: without it, Python falls back to the
             # platform's default encoding (often cp1252 on Windows), which
@@ -259,6 +263,14 @@ class MSPReportExporter(ExporterBase):
                 with open(apps_path, 'w', encoding='utf-8') as f:
                     f.write(apps_html)
                 logger.info(f"Exported enterprise applications: {apps_path}")
+
+            if has_policies:
+                policies_html = self._generate_policy_compliance_page(
+                    artifacts, customer_name, assessment_id, back_href=main_filename,
+                )
+                with open(policies_path, 'w', encoding='utf-8') as f:
+                    f.write(policies_html)
+                logger.info(f"Exported policy compliance: {policies_path}")
 
             # Always written, even with zero entries — a "no issues this
             # run" page is itself a meaningful, reassuring result, not
@@ -312,6 +324,7 @@ class MSPReportExporter(ExporterBase):
         health_log: Optional[List[Any]] = None,
         health_href: Optional[str] = None,
         apps_href: Optional[str] = None,
+        policies_href: Optional[str] = None,
     ) -> str:
         compliance_score = ComplianceScorer.calculate_overall_score(artifacts)
         coverage = ComplianceScorer.calculate_coverage(artifacts)
@@ -617,21 +630,14 @@ class MSPReportExporter(ExporterBase):
                 # Registered above, never a substitute for it (see the
                 # federated-identity caveat in the paragraph above this
                 # table, and in entra_identity_collector.py's own docstring).
-                weakest_tier = attrs.get('weakestAuthMethodTier')
                 auth_details = attrs.get('authMethodDetails') or []
                 auth_lookup_failed = attrs.get('authMethodLookupFailed')
                 if not is_cloud:
                     auth_cell = '<span class="na">N/A (on-prem)</span>'
                 elif auth_lookup_failed:
                     auth_cell = '<span class="status-warn">Lookup failed</span>'
-                elif weakest_tier == 'strong':
-                    auth_cell = f'<span class="status-good">Strong ({", ".join(auth_details)})</span>'
-                elif weakest_tier == 'moderate':
-                    auth_cell = f'<span class="status-warn">Moderate ({", ".join(auth_details)})</span>'
-                elif weakest_tier == 'weak':
-                    auth_cell = f'<span class="status-bad">Weak ({", ".join(auth_details)})</span>'
                 elif auth_details:
-                    auth_cell = f'<span class="status-neutral">{", ".join(auth_details)}</span>'
+                    auth_cell = ', '.join(auth_details)
                 else:
                     auth_cell = '<span class="na">None registered</span>'
 
@@ -744,26 +750,22 @@ class MSPReportExporter(ExporterBase):
         html += "        </div>\n"
 
         if artifacts.policies:
+            mapped_policies = [p for p in artifacts.policies if cm.controls_for_policy(p.policy_name, p.policy_type)]
+            unmapped_count = len(artifacts.policies) - len(mapped_policies)
+            passing = sum(1 for p in mapped_policies if ComplianceScorer._policy_passes(p) is True)
+            failing = sum(1 for p in mapped_policies if ComplianceScorer._policy_passes(p) is False)
+            href = policies_href or "policies.html"
             html += f"""        <div class="section" id="sec-policy-compliance">
             <h2>Policy Compliance</h2>
             {self._satisfies_badge_html(['config_enforcement', 'time_sync', 'password_complexity_enforcement', 'password_reuse_enforcement', 'account_lockout_enforcement', 'storage_encryption_requirement', 'firewall_policy_requirement', 'malware_protection_requirement', 'patch_management_policy', 'app_protection_policy'], present_evidence)}
-            <table>
-                <tr><th>Policy</th><th>Type</th><th>Status</th><th>Current Value</th></tr>
+            <p>{len(mapped_policies)} CMMC-relevant polic{'y' if len(mapped_policies) == 1 else 'ies'} evaluated:
+            <span class="status-good">{passing} passing</span>,
+            <span class="{'status-bad' if failing else 'status-good'}">{failing} failing</span>.
+            {f'{unmapped_count} additional polic{"y" if unmapped_count == 1 else "ies"} with no direct CMMC mapping omitted.' if unmapped_count else ''}
+            See the full breakdown with CMMC control mappings in
+            <a href="{href}">{href}</a>.</p>
+        </div>
 """
-            for policy in artifacts.policies:
-                passes = ComplianceScorer._policy_passes(policy)
-                if passes is True:
-                    status_color = 'status-good'
-                elif passes is False:
-                    status_color = 'status-bad'
-                else:
-                    status_color = 'status-neutral'  # informational / no specific rule — not a warning
-                html += (
-                    f"                <tr><td>{policy.policy_name}</td><td>{policy.policy_type}</td>"
-                    f"<td><span class=\"{status_color}\">{policy.status}</span></td>"
-                    f"<td>{policy.value or 'N/A'}</td></tr>\n"
-                )
-            html += "            </table>\n        </div>\n"
 
         html += self._generate_software_summary_link_html(artifacts, present_evidence, software_href)
         html += self._generate_security_events_html(artifacts, present_evidence)
@@ -1638,6 +1640,75 @@ class MSPReportExporter(ExporterBase):
             <table>
                 <tr><th>Name</th><th>App ID</th><th>Enabled</th><th>Type</th><th>Permissions</th></tr>
 {rows_html}
+            </table>
+        </div>
+        <p class="back-link"><a href="{back_href}">&larr; Back to main compliance report</a></p>
+    </div>
+</body>
+</html>"""
+
+    def _generate_policy_compliance_page(self, artifacts: Any, customer_name: Optional[str],
+                                          assessment_id: Optional[str], back_href: str) -> str:
+        """Standalone policy compliance page — shows every CMMC-mapped policy
+        with its status, current value, and which CMMC controls it satisfies
+        or supports. Policies with no CMMC mapping are omitted entirely.
+        Moved out of the main report because the policy list can be very long
+        (dozens to hundreds of entries for a well-configured tenant)."""
+        customer_name = customer_name or "Unnamed Customer"
+        assessment_id = assessment_id or "CMMC-" + datetime.now().strftime("%Y%m%d%H%M%S")
+
+        mapped_policies = [p for p in artifacts.policies if cm.controls_for_policy(p.policy_name, p.policy_type)]
+        unmapped_count = len(artifacts.policies) - len(mapped_policies)
+
+        rows = []
+        for policy in mapped_policies:
+            passes = ComplianceScorer._policy_passes(policy)
+            if passes is True:
+                status_color = 'status-good'
+            elif passes is False:
+                status_color = 'status-bad'
+            else:
+                status_color = 'status-neutral'
+
+            controls = cm.controls_for_policy(policy.policy_name, policy.policy_type)
+            control_badges = " ".join(
+                f'<span class="badge {"direct" if conf == cm.Confidence.DIRECT else "supporting"}">{pid}</span>'
+                for pid, conf in controls
+            )
+            rows.append(
+                f"                <tr><td>{policy.policy_name}</td><td>{policy.policy_type}</td>"
+                f"<td><span class=\"{status_color}\">{policy.status}</span></td>"
+                f"<td>{policy.value or 'N/A'}</td>"
+                f"<td>{control_badges}</td></tr>\n"
+            )
+
+        return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Policy Compliance — {customer_name}</title>
+    <style>{_BASE_CSS}</style>
+</head>
+<body>
+    <div class="header">
+        <h1>Policy Compliance</h1>
+        <div class="subtitle">{customer_name} — {assessment_id}</div>
+    </div>
+    <div class="content">
+        <p class="back-link"><a href="{back_href}">&larr; Back to main compliance report</a></p>
+        <div class="section" id="sec-policy-compliance-table">
+            <h2>CMMC-Relevant Policies</h2>
+            <p class="confidence-key">
+                <span class="badge direct">Direct</span> = policy directly satisfies the practice's
+                assessment objective &nbsp;&nbsp;
+                <span class="badge supporting">Supporting</span> = policy supports but does not
+                fully satisfy the practice on its own
+            </p>
+            <p>{len(mapped_policies)} polic{'y' if len(mapped_policies) == 1 else 'ies'} with a
+            CMMC control mapping shown below.{f' {unmapped_count} additional polic{"y" if unmapped_count == 1 else "ies"} with no direct CMMC mapping omitted.' if unmapped_count else ''}</p>
+            <table>
+                <tr><th>Policy</th><th>Type</th><th>Status</th><th>Current Value</th><th>CMMC Controls</th></tr>
+{"".join(rows)}
             </table>
         </div>
         <p class="back-link"><a href="{back_href}">&larr; Back to main compliance report</a></p>

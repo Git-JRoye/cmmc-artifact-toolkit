@@ -136,7 +136,10 @@ under **APIs my organization uses → WindowsDefenderATP**:
 
 ### Configure tenants.yaml
 
-Fill in your `tenants.yaml` with the shared app and test tenant:
+Fill in your `tenants.yaml` with the shared app and both profiles — on-prem
+(your local machine) **and** cloud (your Tenguard tenant). The pilot is
+designed to exercise both planes at once, just like a real hybrid client
+assessment:
 
 ```yaml
 app:
@@ -144,16 +147,36 @@ app:
   secret_ref: "TENGUARD_GRAPH_CLIENT_SECRET"
 
 clients:
+  - tenant_key: royepc
+    display_name: "ROYEPC (local machine)"
+    planes: [onprem]
+
   - tenant_key: tenguard
     display_name: "Tenguard Security"
     tenant_id: "your-tenant-id"
 ```
 
+NOTE: These are configured as two SEPARATE profiles for the pilot, even
+though they represent the same physical machine/organization (your laptop,
+scanned locally and also enrolled in Tenguard's Intune). That's fine for
+testing each plane independently. In production, a real hybrid client would
+be a single profile with `planes: [onprem, cloud]`, which also enables
+device de-duplication (merging the on-prem scan and the Intune record of
+the same machine into one report entry).
+
 Set the secret and run:
 
 ```powershell
 $env:TENGUARD_GRAPH_CLIENT_SECRET = "the real client secret"
-python run_assessment.py --tenant tenguard
+python run_assessment.py
+```
+
+This runs **both** profiles — you'll get `report_royepc.html` (on-prem)
+and `report_tenguard.html` (cloud). To run just one:
+
+```powershell
+python run_assessment.py --tenant tenguard    # cloud only
+python run_assessment.py --tenant royepc      # on-prem only
 ```
 
 **Watch for:**
