@@ -222,3 +222,96 @@ class GraphClient:
                 continue
             resp.raise_for_status()
             return resp.json()
+
+    def run_export_job(self, report_name: str, select: Optional[List[str]] = None,
+                        filter_str: str = "", poll_interval: float = 3.0,
+                        poll_timeout: float = 300.0) -> List[Dict[str, str]]:
+        """Run an Intune deviceManagement/reports/exportJobs report
+        end-to-end and return its rows as a list of dicts (parsed CSV).
+
+        A genuinely different interaction shape than every other method in
+        this file — an ASYNC JOB, not a single request/response:
+          1. POST to create the job -> returns a job id
+          2. GET repeatedly to poll -> until status == "completed"
+          3. A THIRD, SEPARATE, UNAUTHENTICATED GET to actually download
+             the result (a pre-signed Azure Blob Storage URL with its own
+             embedded SAS token — sending our Graph bearer token on THIS
+             specific request gets it rejected, confirmed via external
+             review before this was built, not discovered the hard way)
+          4. Unzip the downloaded archive and parse the one CSV inside
+
+        This exists specifically because a prior approach
+        (deviceManagement/reports/getCachedReport) 404'd against a real
+        tenant — that endpoint requires a pre-existing cached report
+        configuration that only gets created as a side effect of a human
+        clicking through the Intune admin center's own report UI, which an
+        unattended app-only collector never does. exportJobs has no such
+        prerequisite — it is fully self-contained.
+
+        HONEST CONFIDENCE NOTE: this request/response shape (reportName,
+        select, format, polling via a status/url field) is recalled with
+        moderate confidence, not independently verified against a live
+        tenant as of this writing. If the real pilot shows a different
+        shape, that is genuinely new information to correct from.
+
+        Raises RuntimeError with a specific message for: no job id
+        returned, the job reporting "failed", the job not completing
+        within poll_timeout, or the downloaded archive containing no CSV
+        — every one of these should be caught and isolated by the caller,
+        never allowed to take down anything else.
+        """
+        import time
+        import zipfile
+        import io
+        import csv
+        import requests
+
+        body: Dict[str, Any] = {"reportName": report_name, "format": "csv"}
+        if select:
+            body["select"] = select
+        if filter_str:
+            body["filter"] = filter_str
+
+        create_result = self.post_one("deviceManagement/reports/exportJobs", body)
+        job_id = create_result.get("id")
+        if not job_id:
+            raise RuntimeError(
+                f"exportJobs '{report_name}' did not return a job id: {create_result}"
+            )
+
+        deadline = time.monotonic() + poll_timeout
+        status_path = f"deviceManagement/reports/exportJobs('{job_id}')"
+        download_url = None
+        last_status = None
+        while time.monotonic() < deadline:
+            status_result = self.get_one(status_path)
+            last_status = (status_result.get("status") or "").lower()
+            if last_status == "completed":
+                download_url = status_result.get("url")
+                break
+            if last_status == "failed":
+                raise RuntimeError(f"exportJobs '{report_name}' job {job_id} reported failed")
+            time.sleep(poll_interval)
+
+        if not download_url:
+            raise RuntimeError(
+                f"exportJobs '{report_name}' job {job_id} did not complete within "
+                f"{poll_timeout}s (last status: {last_status})"
+            )
+
+        # Bare, UNAUTHENTICATED request — see this method's docstring. The
+        # pre-signed URL already carries its own SAS token; adding our
+        # Authorization header here gets the request rejected.
+        download_resp = requests.get(download_url, timeout=60)
+        download_resp.raise_for_status()
+
+        with zipfile.ZipFile(io.BytesIO(download_resp.content)) as archive:
+            csv_names = [n for n in archive.namelist() if n.lower().endswith(".csv")]
+            if not csv_names:
+                raise RuntimeError(
+                    f"exportJobs '{report_name}' result archive contained no CSV: "
+                    f"{archive.namelist()}"
+                )
+            raw = archive.read(csv_names[0]).decode("utf-8-sig")
+
+        return list(csv.DictReader(io.StringIO(raw)))

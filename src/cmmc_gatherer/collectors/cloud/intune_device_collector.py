@@ -7,12 +7,11 @@ work unchanged. Also pulls each device's detected-apps list (CM.L2-3.4.1
 system-inventory evidence — software, not just hardware/OS), whether a
 BitLocker recovery key is escrowed for the device (SC.L2-3.13.10 key
 management evidence — a device can report itself "encrypted" with no
-recoverable key anywhere, which is a real gap this closes), the device's
+recoverable key anywhere, which is a real gap this closes), and the device's
 real-time Windows Defender health (SI.L1-3.14.2 — a stronger, more current
 signal than the compliance-policy REQUIREMENT check elsewhere in this
 project, since this is the device's actual state right now, not just what's
-demanded of it), and real per-device Windows Firewall status via Intune's
-own bulk reporting API.
+demanded of it).
 
 Honest field mapping, not a forced fit:
     Intune's device data shape is different from a local PowerShell posture
@@ -33,8 +32,7 @@ for a handful of devices; on a large MSP client with hundreds of enrolled
 devices, this will be slow and is a real candidate for throttling/retry
 tuning or making optional — not yet pilot-tested against a large fleet. The
 BitLocker recovery-key check below is the SAME per-device fan-out cost,
-added on top of the existing one. The bulk firewall-status report below is
-the one exception to this fan-out pattern — see its own docstring.
+added on top of the existing one.
 
 PILOT HISTORY on detectedApps, since this endpoint has already proven
 unreliable once: a first attempt called it under /v1.0 with $select/$top
@@ -79,10 +77,9 @@ attempt; only the path was ever wrong.
 
 Graph application permissions required:
   DeviceManagementManagedDevices.Read.All (existing — covers managedDevices,
-  its detectedApps sub-resource, windowsProtectionState, AND the bulk
-  firewall-status report below, since all are sub-resources/reports of the
-  same managedDevices object — this is expected, but not independently
-  confirmed for the reports endpoint specifically; see its own docstring)
+  its detectedApps sub-resource, AND windowsProtectionState, since all three
+  are sub-resources of the same managedDevices object with no separate
+  permission scope)
   BitLockerKey.ReadBasic.All (NEW — metadata-only recovery key existence
   check; deliberately NOT BitLockerKey.Read.All, see constraint above)
 """
@@ -173,13 +170,15 @@ class IntuneDeviceCollector(CollectorBase):
                     ep.metadata["owner_type"] = self._check_ownership_type(device_id, ep.hostname)
 
                 # Cloud firewall status: real per-device state (not just a
-                # compliance-policy requirement), from the bulk report
-                # fetched once above. Never guessed at if the bulk fetch
-                # itself failed — every device gets the same, honest
-                # lookup-failed flag in that case, rather than silently
-                # reading as "no data" indistinguishably from "not
-                # applicable".
-                ep.metadata["cloud_firewall_status"] = firewall_statuses.get(device_id) if device_id else None
+                # compliance-policy requirement), from the bulk export
+                # fetched once above, joined by hostname (see
+                # _collect_firewall_statuses for why DeviceName is used as
+                # the join key instead of DeviceId). Never guessed at if
+                # the bulk fetch itself failed — every device gets the
+                # same, honest lookup-failed flag in that case, rather
+                # than silently reading as "no data" indistinguishably
+                # from "not applicable".
+                ep.metadata["cloud_firewall_status"] = firewall_statuses.get((ep.hostname or "").upper())
                 ep.metadata["cloud_firewall_lookup_failed"] = firewall_lookup_failed
 
                 out.append(ep)
@@ -190,81 +189,69 @@ class IntuneDeviceCollector(CollectorBase):
 
     def _collect_firewall_statuses(self) -> Dict[str, str]:
         """Bulk-fetch real, per-device Windows Firewall status for every
-        Intune-managed device in ONE paginated report call, rather than
-        the per-device fan-out used elsewhere in this file (BitLocker,
-        real-time protection, ownership) — Intune's own reporting API
-        happens to return every device's status in one table, which is a
-        genuine efficiency win specific to this endpoint.
+        Intune-managed device via Intune's asynchronous export-report API
+        (see GraphClient.run_export_job for the full mechanics of that
+        pattern) — one export call for the whole tenant, rather than the
+        per-device fan-out used elsewhere in this file (BitLocker,
+        real-time protection, ownership).
 
-        Confirmed directly from Intune's own "Firewall Status" report in
-        the admin center via browser dev tools (Network tab) against a
-        real tenant — the exact request/response shape below, not a
-        guess. The report id
-        "FirewallStatus_00000000-0000-0000-0000-000000000001" is a fixed,
-        all-zeros GUID suffix, strongly suggesting a universal, canned
-        report identifier rather than anything tenant-specific — meaning
-        the same call should work identically against any tenant's
-        Intune environment. Nothing in this method is Tenguard-specific;
-        which tenant's data comes back depends entirely on which
-        tenant's GraphClient/token is used, exactly like every other
-        collector in this project — this is what makes it work for any
-        MSP client without any per-client code changes.
+        PILOT FINDING (real, confirmed): a first version of this method
+        used deviceManagement/reports/getCachedReport, discovered via
+        browser dev tools against a real tenant and confirmed working
+        THAT way — but it 404'd when called from this unattended app-only
+        collector. Root cause, confirmed via external review before
+        chasing it further: getCachedReport requires a pre-existing
+        cached report configuration, which only gets created as a side
+        effect of a human clicking through the Intune admin center's own
+        report UI ("Generate again") — an interactive, delegated-auth
+        action this app-only collector never performs. The exportJobs API
+        used here has no such prerequisite; it is fully self-contained,
+        confirmed to work identically for any tenant (no per-client setup
+        beyond the one-time app registration / admin consent this whole
+        project already requires).
+
+        Joins on DeviceName (case-insensitive), NOT DeviceId — DeviceId is
+        offered in the Intune portal's own column picker for this report,
+        but is not confirmed to actually be present in the export's real
+        returned columns. DeviceName is the more reliably-present join
+        key, matched against each managedDevice's own deviceName in
+        collect() below.
 
         Uses Microsoft's own human-readable "_loc" column (e.g.
-        "Enabled") for the status value, rather than the raw
-        FirewallStatus integer code, whose exact numeric meaning per
-        value isn't confidently known — reusing Microsoft's own
-        translation avoids guessing at it.
+        "Enabled") for the status value, rather than the raw FirewallStatus
+        integer code, whose exact numeric meaning per value isn't
+        confidently known — reusing Microsoft's own translation avoids
+        guessing at it.
 
-        HONEST CONFIDENCE NOTE: the report id itself and its /beta
-        location are directly confirmed. The full set of possible
-        "_loc" values beyond "Enabled" (the only one seen in the real
-        pilot data so far — presumably "Disabled" exists too, but that
-        specific string is not confirmed) is not exhaustively verified.
-        The exact required Graph permission is also not confirmed — this
-        is expected to be covered by DeviceManagementManagedDevices.Read.All
-        (already required elsewhere in this project for Intune device
-        data), but if this 403s, the real error text will say what's
-        actually missing.
+        HONEST CONFIDENCE NOTE: the exact export column set
+        (DeviceName, FirewallStatus, FirewallStatus_loc, _ManagedBy, UPN)
+        is recalled with moderate confidence from external review, not
+        independently verified against a live tenant as of this writing.
+        The full set of possible "_loc" values beyond "Enabled" (the only
+        one seen in real pilot data so far) is also not exhaustively
+        verified. Required Graph permissions are expected to be the same
+        DeviceManagementConfiguration.Read.All and
+        DeviceManagementManagedDevices.Read.All already required elsewhere
+        in this project — if this 403s, the real error text will say
+        what's actually missing.
 
-        Returns {intune_device_id: status_label}. A device with no entry
-        in the returned dict (the whole report call failed, or a device
-        simply isn't present in the report for some reason) must be
-        treated as unknown by the caller — never silently read as a
-        confirmed "Enabled" or "Disabled".
+        Returns {hostname.upper(): status_label}. A device with no entry
+        (the whole export failed, or a device simply isn't present in the
+        report for some reason) must be treated as unknown by the caller
+        — never silently read as a confirmed "Enabled" or "Disabled".
         """
+        rows = self._beta_graph.run_export_job(
+            report_name="FirewallStatus",
+            select=["DeviceName", "FirewallStatus", "FirewallStatus_loc", "_ManagedBy", "UPN"],
+        )
         result: Dict[str, str] = {}
-        skip = 0
-        page_size = 200  # well above the 50 the browser UI itself used,
-                          # to minimize the number of pages for a real
-                          # MSP-sized fleet
-        while True:
-            body = {
-                "id": "FirewallStatus_00000000-0000-0000-0000-000000000001",
-                "filter": "",
-                "orderBy": [],
-                "select": ["DeviceId", "FirewallStatus_loc"],
-                "skip": skip,
-                "top": page_size,
-            }
-            response = self._beta_graph.post_one("deviceManagement/reports/getCachedReport", body)
-            schema = response.get("Schema") or []
-            col_index = {col.get("Column"): i for i, col in enumerate(schema)}
-            rows = response.get("Values") or []
-            if "DeviceId" not in col_index or "FirewallStatus_loc" not in col_index:
-                logger.warning("  Firewall status report response missing expected columns: %s",
-                                list(col_index.keys()))
-                break
-            for row in rows:
-                device_id = row[col_index["DeviceId"]]
-                status_label = row[col_index["FirewallStatus_loc"]]
-                if device_id:
-                    result[device_id] = status_label
-            total = response.get("TotalRowCount", len(rows))
-            skip += len(rows)
-            if not rows or skip >= total:
-                break
-        logger.info("  Firewall status (bulk report): %d device(s)", len(result))
+        for row in rows:
+            name = (row.get("DeviceName") or "").strip()
+            if not name:
+                continue
+            status_label = row.get("FirewallStatus_loc") or row.get("FirewallStatus")
+            result[name.upper()] = status_label
+        logger.info("  Firewall status (export report): %d device(s)", len(result))
         return result
 
     def _check_ownership_type(self, device_id: str, hostname: str) -> Optional[str]:
