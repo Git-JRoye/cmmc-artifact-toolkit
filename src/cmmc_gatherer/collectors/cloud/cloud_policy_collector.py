@@ -9,6 +9,27 @@ the current scorer, MSP report, and coverage logic work unchanged:
     including Windows Update Ring settings mined from the same collection)
   - Intune device compliance policies (the actual configured requirements —
     minimum password length, storage encryption, active firewall, Defender)
+  - Intune Endpoint Security policies (deviceManagement/configurationPolicies
+    — a genuinely different Graph collection from deviceConfigurations above,
+    covering the "Endpoint security" blade in the Intune admin center: EDR,
+    Antivirus, Firewall, Disk Encryption, Account Protection, and Attack
+    Surface Reduction profiles)
+
+HONEST CONFIDENCE NOTE on Endpoint Security policies: this is a new,
+genuinely unverified addition. deviceManagement/configurationPolicies (the
+"Settings Catalog" collection Endpoint Security policies are built on) is a
+real, documented Graph resource, but the exact shape of its per-device
+deployment status is not confirmed — this collector calls
+.../deviceStatuses (a per-device list, aggregated client-side into
+success/failed counts here), not .../deviceStatusOverview (the aggregate
+object the deviceConfigurations profiles above use). If deviceStatuses
+404s, deviceStatusOverview is the fallback hypothesis to try next — the
+response body is logged either way so that's a real decision, not a guess,
+if it comes to that. templateReference.templateFamily (and, as a fallback,
+templateDisplayName) are used to identify which Endpoint Security category
+a policy belongs to; the exact enum member names for templateFamily are
+recalled with moderate confidence, same caveat class as every other new
+enum introduced this session.
 
 Honest scope, matching the pattern set by every other collector in this
 project: this reports whether a Conditional Access policy is actually
@@ -66,10 +87,12 @@ as of this writing — if it fails again, the response body is now logged.
 
 Graph application permissions required for this file's full functionality:
   Policy.Read.All (for Conditional Access policies)
-  DeviceManagementConfiguration.Read.All (for Intune configuration profiles
-  AND compliance policies; DeviceManagementManagedDevices.Read.All, already
-  required for the Intune device collector, does NOT cover either of these
-  — they are distinct Graph permission scopes)
+  DeviceManagementConfiguration.Read.All (for Intune configuration profiles,
+  compliance policies, AND endpoint security policies —
+  deviceManagement/configurationPolicies is covered by this same scope, no
+  new permission needed; DeviceManagementManagedDevices.Read.All, already
+  required for the Intune device collector, does NOT cover any of these
+  three — they are distinct Graph permission scopes)
 """
 
 import logging
@@ -84,8 +107,8 @@ logger = logging.getLogger(__name__)
 
 class CloudPolicyCollector(CollectorBase):
     """Collects Entra Conditional Access policies, Intune configuration
-    profile deployment status, and Intune compliance policy requirements
-    via Microsoft Graph."""
+    profile deployment status, Intune compliance policy requirements, and
+    Intune Endpoint Security policy deployment status via Microsoft Graph."""
 
     def __init__(self, graph: GraphClient):
         self.graph = graph
@@ -108,6 +131,10 @@ class CloudPolicyCollector(CollectorBase):
             policies += self._collect_app_protection_policies()
         except Exception as e:
             logger.error("Intune app protection policy collection failed: %s", e)
+        try:
+            policies += self._collect_endpoint_security_policies()
+        except Exception as e:
+            logger.error("Intune endpoint security policy collection failed: %s", e)
         logger.info("Cloud policy collection complete: %d record(s)", len(policies))
         return policies
 
@@ -515,3 +542,207 @@ class CloudPolicyCollector(CollectorBase):
             ))
 
         return rows
+
+    # -- Endpoint Security policies -------------------------------------------
+
+    # Recognized deviceManagementTemplateFamily values for policies that
+    # actually live under the Intune admin center's "Endpoint security"
+    # blade — recalled with moderate confidence, same caveat class as every
+    # other Graph enum in this file. A templateFamily NOT in this dict (e.g.
+    # "none", "baseline", or an unrecognized value) means this is a generic
+    # Settings Catalog policy, not an Endpoint Security one, and is skipped
+    # entirely — this collector's job is Endpoint Security specifically, not
+    # every Settings Catalog policy in the tenant.
+    _ENDPOINT_SECURITY_TEMPLATE_LABELS = {
+        "endpointSecurityAntivirus": "Antivirus",
+        "endpointSecurityFirewall": "Firewall",
+        "endpointSecurityEndpointDetectionAndResponse": "EDR",
+        "endpointSecurityDiskEncryption": "Disk Encryption",
+        "endpointSecurityAccountProtection": "Account Protection",
+        "endpointSecurityAttackSurfaceReduction": "Attack Surface Reduction",
+        "endpointSecurityApplicationControl": "Application Control",
+    }
+
+    # Fallback keyword match against templateDisplayName, used only when
+    # templateFamily is missing or not one of the recognized values above —
+    # per the task's own instruction to identify a policy via templateFamily
+    # OR templateDisplayName. Checked in order; first match wins.
+    _ENDPOINT_SECURITY_NAME_KEYWORDS = (
+        ("antivirus", "Antivirus"),
+        ("firewall", "Firewall"),
+        ("endpoint detection", "EDR"),
+        ("edr", "EDR"),
+        ("disk encryption", "Disk Encryption"),
+        ("bitlocker", "Disk Encryption"),
+        ("account protection", "Account Protection"),
+        ("attack surface reduction", "Attack Surface Reduction"),
+        ("application control", "Application Control"),
+    )
+
+    @classmethod
+    def _endpoint_security_template_label(cls, policy: dict) -> Optional[str]:
+        """Return a readable Endpoint Security category label (EDR,
+        Antivirus, Firewall, ...) for this policy, or None if it doesn't
+        look like an Endpoint Security policy at all — the signal to skip
+        it rather than report it under this policy_type.
+
+        templateReference.templateFamily is the structured, preferred
+        signal; templateDisplayName keyword-matching is only a fallback for
+        when templateFamily is absent or unrecognized, per the task's own
+        instruction to use "templateFamily or templateDisplayName."
+        """
+        template_ref = policy.get("templateReference") or {}
+        family = template_ref.get("templateFamily")
+        if family in cls._ENDPOINT_SECURITY_TEMPLATE_LABELS:
+            return cls._ENDPOINT_SECURITY_TEMPLATE_LABELS[family]
+
+        display_name = (template_ref.get("templateDisplayName") or "").lower()
+        if display_name:
+            for keyword, label in cls._ENDPOINT_SECURITY_NAME_KEYWORDS:
+                if keyword in display_name:
+                    return label
+
+        # A recognized "endpointSecurity*" family we don't have a specific
+        # label for yet is still visibly an Endpoint Security policy — kept
+        # visible under a generic label rather than silently dropped, same
+        # "no silent caps" discipline used elsewhere in this project (e.g.
+        # the software-inventory disclosure notes in the MSP exporter).
+        if isinstance(family, str) and family.startswith("endpointSecurity"):
+            return "Other Endpoint Security"
+
+        return None
+
+    def _collect_endpoint_security_policies(self) -> List[Policy]:
+        """Intune Endpoint Security policies — deviceManagement/
+        configurationPolicies, NOT deviceManagement/deviceConfigurations
+        (the collection _collect_intune_config_profiles above uses). These
+        are two genuinely different Graph collections that happen to serve
+        a similar conceptual purpose (device-targeted configuration); this
+        one specifically backs the Intune admin center's "Endpoint
+        security" blade (EDR, Antivirus, Firewall, Disk Encryption, Account
+        Protection, Attack Surface Reduction).
+
+        No $select is used, matching this file's established defensive
+        pattern for collections that may reject a subtype/profile-specific
+        field name in a base-collection $select (see the compliance-policy
+        and configuration-profile collectors above, both of which hit a
+        real 400 doing exactly that) — full objects are fetched and every
+        field read via .get() so an absent/renamed field degrades to "not
+        present" rather than crashing.
+
+        HONEST CONFIDENCE NOTE: this whole method is unverified against a
+        live tenant as of this writing. If deviceManagement/
+        configurationPolicies itself 404s or 400s, the response body is
+        logged below — check that before assuming the endpoint path is
+        wrong versus a permission gap (DeviceManagementConfiguration.Read.All
+        is already required elsewhere in this file and is expected, not
+        confirmed, to cover this collection too).
+        """
+        out: List[Policy] = []
+        try:
+            for p in self.graph.get_all("deviceManagement/configurationPolicies"):
+                policy_id = p.get("id")
+                name = p.get("displayName") or policy_id or "Unnamed Endpoint Security Policy"
+                template_label = self._endpoint_security_template_label(p)
+                if template_label is None:
+                    logger.info(
+                        "  Skipping non-Endpoint-Security configuration policy '%s' "
+                        "(templateFamily=%s) — not one of the recognized Endpoint "
+                        "Security categories", name,
+                        (p.get("templateReference") or {}).get("templateFamily"),
+                    )
+                    continue
+
+                if not policy_id:
+                    continue
+                try:
+                    success, failed = self._fetch_endpoint_security_device_statuses(policy_id)
+                except Exception as e:
+                    detail = getattr(getattr(e, "response", None), "text", None)
+                    if detail:
+                        logger.warning(
+                            "  Could not fetch device statuses for endpoint security "
+                            "policy '%s': %s | Response: %s", name, e, detail[:500],
+                        )
+                    else:
+                        logger.warning(
+                            "  Could not fetch device statuses for endpoint security "
+                            "policy '%s': %s", name, e,
+                        )
+                    out.append(Policy(
+                        policy_name=name,
+                        policy_type="Intune Endpoint Security",
+                        status="Unknown",
+                        target="Devices",
+                        value=None,
+                        description=f"Endpoint Security policy ({template_label}) — "
+                                     f"deployment status could not be retrieved",
+                        last_applied=p.get("lastModifiedDateTime"),
+                    ))
+                    continue
+
+                # Same "zero applicable devices isn't a pass" distinction as
+                # the configuration-profile collector above.
+                if success == 0 and failed == 0:
+                    status = "Not Applicable"
+                else:
+                    status = "Enabled" if failed == 0 else "Disabled"
+                out.append(Policy(
+                    policy_name=name,
+                    policy_type="Intune Endpoint Security",
+                    status=status,
+                    target="Devices",
+                    value=f"{success} succeeded / {failed} failed",
+                    description=f"Endpoint Security policy ({template_label}) deployment status",
+                    last_applied=p.get("lastModifiedDateTime"),
+                ))
+        except Exception as e:
+            detail = getattr(getattr(e, "response", None), "text", None)
+            if detail:
+                logger.error("Intune endpoint security policy collection failed: %s | Response: %s",
+                             e, detail[:500])
+            else:
+                logger.error("Intune endpoint security policy collection failed: %s", e)
+            return out
+        logger.info("  Intune endpoint security policies parsed: %d record(s)", len(out))
+        return out
+
+    def _fetch_endpoint_security_device_statuses(self, policy_id: str) -> tuple:
+        """Return (success_count, failed_count) for one Endpoint Security
+        policy, aggregated client-side from its per-device status list.
+
+        Calls .../deviceStatuses (a list of individual per-device status
+        records), NOT .../deviceStatusOverview (the pre-aggregated object
+        the classic deviceConfigurations profiles expose) — configurationPolicies
+        is not confirmed to have a deviceStatusOverview sub-resource at all,
+        while deviceStatuses is the documented shape for Settings-Catalog-based
+        policies. If this 404s, deviceStatusOverview is the fallback
+        hypothesis to try next (see module docstring).
+
+        Per-record status values counted here (real Graph values, moderate
+        confidence): 'success' counts as success; 'error' and 'conflict'
+        count as failed (a conflicting policy assignment did not actually
+        apply, which is a real failure state, not a pass). Anything else
+        ('notApplicable', 'unknown', 'pending', or an unrecognized value) is
+        excluded from both counts entirely, matching this project's
+        never-guess-at-an-unconfirmed-label discipline elsewhere (see
+        ComplianceScorer._score_firewall's cloud_known dict) — logged once
+        if seen, rather than silently miscounted either way.
+        """
+        success = 0
+        failed = 0
+        unrecognized = set()
+        for record in self.graph.get_all(f"deviceManagement/configurationPolicies/{policy_id}/deviceStatuses"):
+            status = record.get("status")
+            if status == "success":
+                success += 1
+            elif status in ("error", "conflict"):
+                failed += 1
+            elif status is not None:
+                unrecognized.add(status)
+        if unrecognized:
+            logger.warning(
+                "  Endpoint security policy %s: unrecognized device status value(s) %s "
+                "excluded from success/failed counts", policy_id, sorted(unrecognized),
+            )
+        return success, failed
