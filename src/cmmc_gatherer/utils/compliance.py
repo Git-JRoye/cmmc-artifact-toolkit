@@ -53,7 +53,7 @@ class ComplianceScorer:
     # see exactly what was measured, how much it counted, and what it scored.
     DIMENSION_DESCRIPTIONS = {
         'firewall': "Windows Firewall enabled across all profiles (Domain/Private/Public) on on-prem endpoints, plus real per-device firewall status for Intune-managed cloud devices.",
-        'antivirus': "Antivirus / Windows Defender real-time protection active on on-prem endpoints.",
+        'antivirus': "Antivirus / Windows Defender real-time protection active on on-prem endpoints, plus real per-device real-time protection status for Intune-managed cloud devices.",
         'updates': "On-prem endpoints have installed patch/hotfix history recorded (presence check, not recency).",
         'policies': "Local security policy, UAC, audit policy, Conditional Access, and Intune configuration profiles meeting their individual baselines.",
         'event_logging': "Ratio of Critical/Error security events to total events collected (lower ratio scores higher).",
@@ -185,12 +185,42 @@ class ComplianceScorer:
 
     @classmethod
     def _score_antivirus(cls, artifacts: ArtifactCollection) -> Optional[int]:
-        applicable = [ep for ep in artifacts.endpoints
-                      if ep.antivirus_status is not None and cls._is_scoreable_endpoint(ep)]
-        if not applicable:
+        """Blends on-prem antivirus status with real, per-device cloud
+        (Intune-managed) real-time protection status — the latter from
+        windowsProtectionState (see intune_device_collector.py's
+        _check_realtime_protection, stored as
+        metadata['defender_realtime_protection_enabled']), mirroring the
+        exact on-prem+cloud blend _score_firewall already does. Closes the
+        same "always N/A for cloud-only tenants" gap firewall had — this
+        dimension used to only ever look at ep.antivirus_status, which is
+        deliberately left None for every cloud device (see
+        intune_device_collector.py's _map()), so a cloud-only tenant could
+        never score anything but N/A here regardless of real Defender data.
+        """
+        onprem_applicable = [ep for ep in artifacts.endpoints
+                              if ep.antivirus_status is not None and cls._is_scoreable_endpoint(ep)]
+        onprem_scores = [100 if ep.antivirus_status == "Active" else 0 for ep in onprem_applicable]
+
+        # True/False from windowsProtectionState is a real, confirmed
+        # observed state (not compliance-POLICY intent) — scored directly,
+        # same confidence level as firewall's Enabled/Disabled. None (not
+        # checked, or the per-device lookup itself failed) is excluded from
+        # scoring entirely rather than guessed at, same "never guess"
+        # discipline as everywhere else in this scorer.
+        cloud_scores = []
+        for ep in artifacts.endpoints:
+            if ep.antivirus_status is not None or not cls._is_scoreable_endpoint(ep):
+                continue
+            rtp = (ep.metadata or {}).get('defender_realtime_protection_enabled')
+            if rtp is True:
+                cloud_scores.append(100)
+            elif rtp is False:
+                cloud_scores.append(0)
+
+        all_scores = onprem_scores + cloud_scores
+        if not all_scores:
             return None
-        active = sum(1 for ep in applicable if ep.antivirus_status == "Active")
-        return int((active / len(applicable)) * 100)
+        return int(sum(all_scores) / len(all_scores))
 
     @classmethod
     def _score_updates(cls, artifacts: ArtifactCollection) -> Optional[int]:
