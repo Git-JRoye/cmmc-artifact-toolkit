@@ -61,42 +61,44 @@ live, and it should never be committed to source control.
 
 ### 3.2 Fill in your one tenant entry
 
-For a single org, you'll have exactly one entry in `tenants.yaml`. Three
-shapes, depending on what you're assessing:
+For a single org, you'll have exactly one entry under `clients:` in
+`tenants.yaml`. The config file has three top-level keys: `app:` (shared
+app registration details for cloud collection), `defaults:` (optional
+defaults applied to all clients), and `clients:` (the list of
+tenants/orgs to assess). Three shapes, depending on what you're
+assessing:
+
+**Cloud only** (Entra ID / Intune, no on-prem AD):
+
+```yaml
+app:
+  client_id: "your-app-registration-client-id"
+  secret_ref: "MYCOMPANY_GRAPH_CLIENT_SECRET"
+
+clients:
+  - tenant_key: mycompany
+    display_name: "My Company Inc."
+    tenant_id: "your-entra-tenant-guid"
+```
 
 **On-prem only** (Active Directory / local machines, no cloud):
 
 ```yaml
-tenants:
+clients:
   - tenant_key: mycompany
     display_name: "My Company Inc."
-    planes:
-      - onprem
-    onprem:
+    planes: [onprem]
+    domain_config:
       domain_controller: "dc01.mycompany.local"
       base_dn: "DC=mycompany,DC=local"
       bind_dn: "svc-cmmc@mycompany.local"
       secret_ref: "MYCOMPANY_LDAP_BIND_SECRET"
 ```
 
-**Cloud only** (Entra ID / Intune, no on-prem AD):
-
-```yaml
-tenants:
-  - tenant_key: mycompany
-    display_name: "My Company Inc."
-    national_cloud: commercial   # or gcc, gcc_high, dod
-    planes:
-      - cloud
-    cloud:
-      tenant_id: "your-entra-tenant-guid"
-      client_id: "your-app-registration-client-id"
-      secret_ref: "MYCOMPANY_GRAPH_CLIENT_SECRET"
-```
-
 **Hybrid** (both — the correct setup if you have both an on-prem domain
-and Entra/Intune): combine both blocks under one `tenant_key`, with
-`planes: [onprem, cloud]`. See `tenants.example.yaml`'s "Example 3" for
+and Entra/Intune): combine both, with `planes: [onprem, cloud]`, an
+`app:` block for the cloud credentials, and a `domain_config:` block
+under the client entry. See `tenants.example.yaml`'s "Example 3" for
 the full worked version. This also enables automatic device
 de-duplication — if the same physical machine shows up in both your
 on-prem scan and Intune, it's merged into one entry instead of counted
@@ -105,8 +107,11 @@ twice.
 ### 3.3 Set up the app registration (cloud only)
 
 If you're assessing Entra/Intune, create an app registration in your
-tenant (Entra admin center → App registrations → New registration),
-single-tenant is fine for a single org. Grant these **application**
+tenant (Entra admin center → App registrations → New registration).
+For a single organization, a single-tenant app registration is fine —
+you only need your own tenant to consent. If you're an MSP managing
+multiple client tenants, see `USER_GUIDE_MSP.md` for the multi-tenant
+app registration setup instead. Grant these **application**
 permissions, then **Grant admin consent**:
 
 | Permission | Why |
@@ -326,10 +331,11 @@ defend — this tool only ever applies exactly what you declare.
   unit-tested, but not yet proven on a real hybrid client running as a
   single profile — see `USER_GUIDE_MSP.md` for the hybrid config that
   would actually exercise it.
-- **Vulnerability scanning is not integrated** — a fuller Defender for
-  Endpoint integration, beyond the real-time protection health,
-  signature-freshness, and per-device firewall status already collected,
-  is a real, deferred next step.
+- **MDE collectors are now integrated** — alerts, vulnerabilities,
+  remediation activities, secure configuration assessment, and security
+  baselines are collected from Microsoft Defender for Endpoint. This
+  replaces the earlier limitation where vulnerability scanning was not
+  integrated.
 - **Remote wipe / device sanitization evidence (Media Protection domain)
   is collected** (`deviceManagement/auditEvents`, mapped to
   `MP.L1-3.8.3`) but is genuinely unverified against a live tenant — it's

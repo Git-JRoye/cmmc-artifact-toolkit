@@ -124,6 +124,10 @@ where your actual environment's details live, never committed):
 cp tenants.example.yaml tenants.yaml
 ```
 
+The example file shows a multi-tenant MSP setup with a shared app
+registration. For a single organization, you only need one entry under
+`clients:` — see `USER_GUIDE_SINGLE_ORG.md`.
+
 Now go to:
 
 - **`USER_GUIDE_SINGLE_ORG.md`** if you're assessing one organization

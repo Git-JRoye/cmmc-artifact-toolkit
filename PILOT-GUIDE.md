@@ -16,11 +16,10 @@ all using demo data:
 
 ```powershell
 $env:CMMC_DEMO="1"
-python pilot_test.py
+python run_assessment.py --demo
 ```
 
-You should see two things run to completion with no errors (well — one
-"no profiles configured" note, since neither profile is filled in yet).
+You should see the on-prem demo path run to completion with no errors.
 If this fails, something's wrong with the base install (`pip install -r
 requirements.txt`), not with any collector — fix that first.
 
@@ -60,15 +59,28 @@ name). **Watch for:**
 
 ### Test AD (if you have a test DC)
 
-Fill in `ONPREM_PROFILE` in `pilot_test.py` with your test DC's hostname,
-base DN, and a bind account. Set the bind password as an environment
-variable matching `secret_ref`:
+Add an on-prem entry to your `tenants.yaml` with your test DC's details:
 
-```powershell
-$env:PILOT_AD_BIND_PASSWORD = "the real password"
+```yaml
+clients:
+  - tenant_key: testdc
+    display_name: "Test Domain Controller"
+    planes: [onprem]
+    domain_config:
+      domain_controller: "dc01.test.local"
+      base_dn: "DC=test,DC=local"
+      bind_dn: "svc-cmmc@test.local"
+      secret_ref: "PILOT_AD_BIND_SECRET"
 ```
 
-Then run `python pilot_test.py`. **Watch for:**
+Set the bind password:
+
+```powershell
+$env:PILOT_AD_BIND_SECRET = "the real password"
+python run_assessment.py --tenant testdc
+```
+
+**Watch for:**
 - A successful LDAP bind (if it fails, you'll see the `ldap3` error message
   directly — usually a wrong port/SSL setting or bad credentials).
 - Users, groups, and computers all returning non-zero counts.
@@ -86,31 +98,65 @@ free, disposable test tenant with sample users/groups already populated —
 sign up at the Microsoft 365 developer site if you don't already have one
 set aside for testing. Do not use a production client tenant for this.
 
-### Set up an app registration in the test tenant
-1. In the test tenant's Entra admin center, register a new application.
-2. Note the **Application (client) ID** and the **Directory (tenant) ID**.
-3. Create a client secret under **Certificates & secrets** — copy the value
+### Set up a multi-tenant app registration
+
+1. In **your own** Entra tenant (e.g. Tenguard), register a new application
+   (or use an existing one like `cmmc-toolkit-pilot`).
+2. Under **Authentication → Supported account types**, set it to
+   **"Multiple Entra ID tenants"** (multi-tenant).
+3. Note the **Application (client) ID** and the **Directory (tenant) ID**.
+4. Create a client secret under **Certificates & secrets** — copy the value
    immediately, it's not retrievable later.
-4. Under **API permissions**, add these **Application** (not Delegated)
+5. Under **API permissions**, add these **Application** (not Delegated)
    permissions for Microsoft Graph:
    - `User.Read.All`
    - `Group.Read.All`
    - `AuditLog.Read.All`
    - `DeviceManagementManagedDevices.Read.All`
-5. Click **Grant admin consent** for the tenant — without this step, every
-   call will fail with a permissions error regardless of the permissions
-   being listed.
+   - `DeviceManagementConfiguration.Read.All`
+   - `DeviceManagementApps.Read.All`
+   - `DeviceManagementRBAC.Read.All`
+   - `RoleManagement.Read.Directory`
+   - `Reports.Read.All`
+   - `Policy.Read.All`
+   - `BitlockerKey.ReadBasic.All`
+   - `Application.Read.All`
+   - `SecurityAlert.Read.All`
+   - `UserAuthenticationMethod.Read.All`
+6. Click **Grant admin consent** for your own tenant.
 
-### Fill in the harness
-In `pilot_test.py`, uncomment and fill in `CLOUD_PROFILE` with the tenant ID,
-client ID, and `national_cloud` (leave as `COMMERCIAL` unless your test
-tenant is specifically GCC High). Set the secret:
+For MDE (Defender for Endpoint) collectors, also add these permissions
+under **APIs my organization uses → WindowsDefenderATP**:
+   - `Alert.Read.All`
+   - `Vulnerability.Read.All`
+   - `SecurityRecommendation.Read.All`
+   - `SecurityConfiguration.Read.All`
+   - `SecurityBaselinesAssessment.Read.All`
+   - `RemediationTasks.Read.All`
 
-```powershell
-$env:PILOT_GRAPH_CLIENT_SECRET = "the real client secret"
+### Configure tenants.yaml
+
+Fill in your `tenants.yaml` with the shared app and test tenant:
+
+```yaml
+app:
+  client_id: "your-app-client-id"
+  secret_ref: "TENGUARD_GRAPH_CLIENT_SECRET"
+
+clients:
+  - tenant_key: tenguard
+    display_name: "Tenguard Security"
+    tenant_id: "your-tenant-id"
 ```
 
-Run `python pilot_test.py`. **Watch for:**
+Set the secret and run:
+
+```powershell
+$env:TENGUARD_GRAPH_CLIENT_SECRET = "the real client secret"
+python run_assessment.py --tenant tenguard
+```
+
+**Watch for:**
 - A successful token acquisition (an MSAL auth failure will show the actual
   `error`/`error_description` from Entra directly — common causes: wrong
   tenant/client ID, secret expired or mistyped, or admin consent not granted
@@ -121,6 +167,29 @@ Run `python pilot_test.py`. **Watch for:**
   collector will correctly return an empty list with no error — that's
   expected, not a bug. Enroll one test device if you want to validate that
   path too.
+- MDE collectors will only return data if Defender for Endpoint is actually
+  deployed in the tenant. If not, they'll log warnings but not fail the
+  overall assessment.
+
+### Testing with a second (client) tenant
+
+This is the real multi-tenant test. Get a second tenant ID (your M365 dev
+tenant, or a client who's agreed to test):
+
+1. Have the second tenant's admin visit:
+   ```
+   https://login.microsoftonline.com/{second-tenant-id}/adminconsent?client_id={your-app-client-id}
+   ```
+2. Add them to `tenants.yaml`:
+   ```yaml
+     - tenant_key: testclient
+       display_name: "Test Client"
+       tenant_id: "second-tenant-id"
+   ```
+3. Run: `python run_assessment.py --tenant testclient`
+
+If the consent URL works and the assessment runs, your multi-tenant setup
+is validated — every future client follows the same two-step process.
 
 ---
 

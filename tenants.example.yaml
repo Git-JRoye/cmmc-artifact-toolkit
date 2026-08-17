@@ -1,139 +1,126 @@
+# ─────────────────────────────────────────────────────────────────────
 # Tenant configuration — one entry per client you assess.
+# ─────────────────────────────────────────────────────────────────────
 #
 # Copy this file to tenants.yaml (gitignored — never commit real client
-# identifiers) and fill in real values for each client. Nothing in this
-# example file is a real tenant; every value below is a placeholder.
+# identifiers) and fill in real values. Nothing below is a real tenant;
+# every value is a placeholder.
 #
-# Secrets are NEVER stored here. Each "secret_ref" below is just a NAME —
-# the actual secret value is looked up at runtime from wherever your
-# secret_resolver reads from. The default resolver (used by run_assessment.py)
+# Secrets are NEVER stored here. Each "secret_ref" is just a NAME — the
+# actual secret value is looked up at runtime from wherever your
+# secret_resolver reads from. The default resolver (in run_assessment.py)
 # reads environment variables by that exact name, e.g.:
 #
-#     secret_ref: ACME_GRAPH_CLIENT_SECRET
-#     -> before running: $env:ACME_GRAPH_CLIENT_SECRET = "the real secret"
+#     secret_ref: MSP_SHARED_APP_SECRET
+#     -> before running: $env:MSP_SHARED_APP_SECRET = "the real secret"
 #
-# For anything beyond a single-operator setup, swap in a real vault lookup
-# instead of environment variables — see run_assessment.py's
-# build_secret_resolver() for where that swap happens.
-
-# ---------------------------------------------------------------------------
-# TWO WAYS TO SET UP CLOUD ACCESS — pick per client
-# ---------------------------------------------------------------------------
+# For anything beyond a single-operator setup, swap in a real vault
+# lookup — see run_assessment.py's secret_resolver for where that swap
+# happens.
 #
-# Option A: a SEPARATE app registration per client (Examples 1-3 below).
-# Each client creates their own app registration in their own tenant, gives
-# you its tenant_id/client_id/secret, and admin-consents your requested
-# permissions. Works for any national cloud. Most setup work per client.
+# ─────────────────────────────────────────────────────────────────────
+# HOW MULTI-TENANT AUTH WORKS
+# ─────────────────────────────────────────────────────────────────────
 #
-# Option B: ONE multi-tenant app registration shared across many clients
-# (Example 4 below) — the closer equivalent to how MSP tooling is normally
-# set up. You create ONE app registration and set "Supported account types"
-# to "Accounts in any organizational directory" (multi-tenant). Each new
-# client then just visits an admin-consent URL and approves it for their
-# own tenant — no app registration on their end at all:
+# The recommended setup for MSPs: register ONE app in your own Entra
+# tenant, set "Supported account types" to "Multiple Entra ID tenants"
+# (multi-tenant), and define it once in the "app:" section below. Every
+# client then just visits an admin-consent URL and approves it:
 #
 #     https://login.microsoftonline.com/{their-tenant-id}/adminconsent?client_id={your-app-id}
 #
-# After that, every client entry reuses the SAME client_id and secret_ref —
-# only tenant_id differs per client, since that's what actually identifies
-# whose directory you're reaching.
+# After that, adding a new client is 3 lines of YAML — no per-client
+# app registration to create or track.
 #
-# IMPORTANT LIMIT: this only works WITHIN one national cloud. A multi-tenant
-# app registered in the commercial cloud (GCC rides commercial, so this
-# covers GCC too) can reach any commercial/GCC tenant that's consented — but
-# it CANNOT reach a GCC High or DoD tenant. Those live in an entirely
-# separate Entra namespace with their own login/graph endpoints (see
-# cloud/cloud_config.py's NATIONAL_CLOUDS). A GCC High or DoD client still
-# needs Option A: their own app registration, created inside that cloud.
-# ---------------------------------------------------------------------------
+# IMPORTANT LIMIT: this only works WITHIN one national cloud. A
+# multi-tenant app registered in the commercial cloud (GCC rides
+# commercial, so GCC is covered too) can reach any commercial/GCC
+# tenant — but CANNOT reach a GCC High or DoD tenant. Those live in a
+# separate Entra namespace. A GCC High/DoD client needs their own app
+# registration — override client_id and secret_ref on that client's
+# entry (see Example 4 below).
+# ─────────────────────────────────────────────────────────────────────
 
-tenants:
+# ── Shared app registration (applies to all clients by default) ─────
+app:
+  client_id: "55555555-5555-5555-5555-555555555555"
+  secret_ref: "MSP_SHARED_APP_SECRET"    # env var name, NOT the secret itself
 
-  # --- Example 1: cloud-only client (Entra ID + Intune) ---------------------
-  # This example uses Option A (a dedicated app registration for this one
-  # client). See Example 4 below for Option B (one shared multi-tenant app).
-  - tenant_key: acme                 # short internal name, must be unique
-    display_name: "Acme Corporation" # shown in reports
-    national_cloud: commercial       # commercial | gcc | gcc_high | dod
-    planes:
-      - cloud                        # list one or both of: cloud, onprem
-                                      # (see Example 3 below for a client
-                                      # running both planes at once)
+# ── Defaults (inherited by every client unless overridden) ──────────
+defaults:
+  national_cloud: commercial        # commercial | gcc | gcc_high | dod
+  planes:
+    - cloud                         # cloud | onprem | both for hybrid
+  auth_method: app_registration     # app_registration | gdap | interactive
 
-    cloud:
-      # Entra app registration details for this client. Each client needs
-      # their OWN app registration with the required Graph application
-      # permissions admin-consented — see cloud/graph.py for the full list.
-      tenant_id: "00000000-0000-0000-0000-000000000000"   # Entra directory (tenant) GUID
-      client_id: "11111111-1111-1111-1111-111111111111"   # app registration (application) ID
-      secret_ref: "ACME_GRAPH_CLIENT_SECRET"               # name of the env var holding the secret
+# ── Client list ─────────────────────────────────────────────────────
+clients:
 
-  # --- Example 2: on-prem-only client (Active Directory) ---------------------
+  # --- Example 1: minimal cloud-only client (the common case) -------
+  # This is all you need for most commercial/GCC clients — 3 lines.
+  # client_id and secret_ref come from the shared "app:" section above.
+  - tenant_key: acme
+    display_name: "Acme Corporation"
+    tenant_id: "00000000-0000-0000-0000-000000000000"
+
+  # --- Example 2: on-prem-only client (Active Directory) -------------
   - tenant_key: globex
     display_name: "Globex Corporation"
     planes:
       - onprem
-
-    onprem:
-      domain_controller: "dc01.globex.local"   # hostname or IP of a reachable DC
+    domain_config:
+      domain_controller: "dc01.globex.local"
       base_dn: "DC=globex,DC=local"
-      bind_dn: "svc-cmmc@globex.local"          # service account with read access
+      bind_dn: "svc-cmmc@globex.local"
       secret_ref: "GLOBEX_LDAP_BIND_SECRET"
-      port: 636                                 # 636 = LDAPS (default, recommended), 389 = LDAP
+      port: 636
       use_ssl: true
-      stale_after_days: 90                      # account inactivity threshold for staleness flagging
+      stale_after_days: 90
 
-  # --- Example 3: hybrid client (both planes, same organization) -------------
-  # This is the correct way to configure a client with BOTH an on-prem
-  # domain and Entra/Intune — one profile, both plane blocks. This also
-  # ensures device de-duplication runs correctly (a device seen from both
-  # on-prem and Intune is merged into one report entry, matched by
-  # hostname) — that merge only happens within a single profile with both
-  # planes configured, not across two separate profiles.
+  # --- Example 3: hybrid client (both planes, same organization) -----
+  # One profile, both planes. This also enables automatic device
+  # de-duplication — a device seen from both on-prem and Intune is
+  # merged into one report entry, matched by hostname.
   - tenant_key: initech
     display_name: "Initech LLC"
-    national_cloud: gcc_high          # example: a GCC High client
+    tenant_id: "22222222-2222-2222-2222-222222222222"
     planes:
       - onprem
       - cloud
-
-    cloud:
-      tenant_id: "22222222-2222-2222-2222-222222222222"
-      client_id: "33333333-3333-3333-3333-333333333333"
-      secret_ref: "INITECH_GRAPH_CLIENT_SECRET"
-
-    onprem:
+    domain_config:
       domain_controller: "dc01.initech.local"
       base_dn: "DC=initech,DC=local"
       bind_dn: "svc-cmmc@initech.local"
       secret_ref: "INITECH_LDAP_BIND_SECRET"
 
-  # --- Example 4: MSP scale-out — many clients, ONE multi-tenant app --------
-  # This is Option B from the note above: two separate commercial-cloud
-  # clients (different tenant_id, different real organizations) sharing the
-  # exact SAME client_id and secret_ref, because both have admin-consented
-  # your one multi-tenant app registration. This is the recommended pattern
-  # once you're managing more than a handful of clients — no per-client app
-  # registration to create or track, and adding a new client is: (1) they
-  # visit your admin-consent URL and approve it, (2) you add one entry here
-  # with their tenant_id. Remember: only commercial/GCC clients can be
-  # reached this way — a GCC High or DoD client still needs Option A.
+  # --- Example 4: GCC High client (needs its own app registration) ---
+  # GCC High / DoD tenants can't use your commercial multi-tenant app.
+  # Override client_id and secret_ref for this client only.
+  - tenant_key: fedclient
+    display_name: "Federal Client Inc"
+    tenant_id: "33333333-3333-3333-3333-333333333333"
+    national_cloud: gcc_high
+    client_id: "77777777-7777-7777-7777-777777777777"    # separate app in gov cloud
+    secret_ref: "FEDCLIENT_GCCH_CLIENT_SECRET"            # separate secret
+
+  # --- Example 5: another commercial client using the shared app -----
+  # Same shared app as Example 1 — only tenant_id differs.
   - tenant_key: wayne_enterprises
     display_name: "Wayne Enterprises"
-    national_cloud: commercial
-    planes:
-      - cloud
-    cloud:
-      tenant_id: "44444444-4444-4444-4444-444444444444"   # THIS differs per client
-      client_id: "55555555-5555-5555-5555-555555555555"   # SAME shared multi-tenant app
-      secret_ref: "MSP_SHARED_APP_SECRET"                  # SAME for every client using this app
+    tenant_id: "44444444-4444-4444-4444-444444444444"
 
+  # --- Example 6: client with asset scope exceptions -----------------
   - tenant_key: stark_industries
     display_name: "Stark Industries"
-    national_cloud: commercial
-    planes:
-      - cloud
-    cloud:
-      tenant_id: "66666666-6666-6666-6666-666666666666"   # THIS differs per client
-      client_id: "55555555-5555-5555-5555-555555555555"   # SAME shared multi-tenant app
-      secret_ref: "MSP_SHARED_APP_SECRET"                  # SAME for every client using this app
+    tenant_id: "66666666-6666-6666-6666-666666666666"
+    asset_scope:
+      default: cui_asset
+      exceptions:
+        - identifier_type: hostname
+          identifier: STARK-GUEST-WIFI
+          category: out_of_scope
+          reason: "Guest network, physically separate"
+        - identifier_type: hostname
+          identifier: STARK-R&D-LAB-PLC
+          category: specialized
+          reason: "Operational Technology — R&D lab equipment"

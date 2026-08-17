@@ -30,6 +30,8 @@ Compliance scoring	✅ Real — six-dimension weighted scorer, with the full wei
 CMMC/NIST 800-171 practice mapping	✅ Real — evidence is mapped to specific practice IDs (e.g. IA.L2-3.5.3, AU.L2-3.3.7, SC.L2-3.13.10), tagged DIRECT or SUPPORTING confidence, shown in a domain-grouped navigation section
 CMMC asset scope (CUI Asset / SPA / CRMA / Specialized / Out-of-Scope)	✅ Real — per-tenant config, defaults to "everything in scope," excludes/documents assets per the CMMC Assessment Guide's categorization
 Collection Health reporting	✅ Real — every collector warning/error is captured and shown in the report itself (always-present page + summary), not only the console
+MDE alerts, vulnerabilities, remediation, secure config, baseline	✅ Real — Microsoft Defender for Endpoint API; mapped to CA/IR/RA/SI practices
+Multi-tenant YAML config	✅ Real — one shared app registration, per-client entries in tenants.yaml, tenant_config_loader.py
 SSP / POA&M generation	❌ Not started
 Exchange Online mailbox evidence (audit logging, forwarding, DKIM/DMARC)	❌ Not started — needs a separate connection mechanism from Graph
 Remote/fleet-wide on-prem collection	❌ Not started — currently only runs locally on the machine executing the script
@@ -55,9 +57,16 @@ src/cmmc_gatherer/
 │       ├── intune_device_collector.py       # + BitLocker escrow, real-time Defender health, firewall status, ownership
 │       ├── intune_rbac_collector.py         # Intune administrative role assignments
 │       ├── cloud_event_collector.py         # sign-in/audit logs + Graph Security API alerts + device sanitization events
-│       └── cloud_policy_collector.py        # Conditional Access, Intune config/compliance policies, Update Ring, App Protection Policy
+│       ├── cloud_policy_collector.py        # Conditional Access, Intune config/compliance policies, Update Ring, App Protection Policy
+│       ├── defender_device_collector.py     # MDE device inventory
+│       ├── mde_alert_collector.py           # MDE security alerts
+│       ├── mde_vulnerability_collector.py   # MDE vulnerability findings
+│       ├── mde_remediation_collector.py     # MDE remediation activities
+│       ├── mde_secure_config_collector.py   # MDE secure configuration assessment
+│       └── mde_baseline_collector.py        # MDE security baseline compliance
 ├── cloud/
 │   ├── cloud_config.py            # national-cloud registry + TenantProfile
+│   ├── tenant_config_loader.py    # YAML config → TenantProfile list
 │   └── graph.py                   # Graph auth providers + paged client
 ├── models/artifacts.py            # shared artifact types (Endpoint, ADObject, ...)
 ├── asset_scope.py                 # CMMC asset categorization (CUI Asset/SPA/CRMA/Specialized/Out-of-Scope)
@@ -70,7 +79,7 @@ src/cmmc_gatherer/
 
 Why two planes, one model set: an on-prem endpoint and an Intune-managed device don't expose the same fields — a centrally managed device has no local firewall-profile concept, for instance. Rather than force a fit, cloud collectors map what genuinely translates and put the rest in metadata, so nothing is silently fabricated to make the schema line up.
 
-Multi-cloud by design: cloud/cloud_config.py holds a small registry mapping each national cloud (commercial, GCC, GCC High, DoD) to its correct Microsoft Graph endpoint and login authority. A TenantProfile declares which cloud a client is in; the Graph client and auth provider read that and target the right endpoint automatically — commercial and GCC High are both just configuration, not separate code paths.
+Multi-cloud by design: cloud/cloud_config.py holds a small registry mapping each national cloud (commercial, GCC, GCC High, DoD) to its correct Microsoft Graph endpoint and login authority. A TenantProfile declares which cloud a client is in; the Graph client and auth provider read that and target the right endpoint automatically — commercial and GCC High are both just configuration, not separate code paths. For MSPs, the recommended setup is a single multi-tenant app registration shared across all commercial/GCC clients — new clients are added with just 3 lines of YAML in `tenants.yaml` (see `docs/USER_GUIDE_MSP.md`).
 
 Getting started
 
@@ -86,11 +95,13 @@ Quick reference once set up:
 ```bash
 pip install -r requirements.txt
 cp tenants.example.yaml tenants.yaml   # fill in your real environment's details
+                                       # including the app: section with your multi-tenant app's client_id
 python run_assessment.py --config tenants.yaml --list   # validate config, no real collection yet
 python run_assessment.py --all                          # run every configured tenant
 ```
 
-Requires Python 3.10+. On-prem collection requires PowerShell 5.1+ on the target Windows host. Cloud collection requires an Entra app registration in the tenant's own national cloud (a commercial app registration cannot authenticate a GCC High tenant) with admin-consented Graph permissions — the full current list is in `docs/USER_GUIDE_SINGLE_ORG.md` §3.3.
+Requires Python 3.10+. On-prem collection requires PowerShell 5.1+ on the target Windows host. Cloud collection requires an Entra app registration in the tenant's own national cloud — a commercial app registration cannot authenticate a GCC High tenant. For commercial/GCC clients, a single multi-tenant app registration can reach them all — see `docs/USER_GUIDE_MSP.md`. The full current permission list is in `docs/USER_GUIDE_SINGLE_ORG.md` §3.3.
+
 Regulatory accuracy — a standing caution
 
 CMMC levels, the 800-171 revision in force, and SPRS scoring weights change over time and are not hardcoded in this codebase for that reason — treat any control list or weight as external, versioned configuration once the scoring rework lands, and verify current requirements against official DoD/CMMC sources before relying on a score for an actual assessment.
