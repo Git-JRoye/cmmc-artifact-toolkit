@@ -82,7 +82,7 @@ class AssetException:
 class AssetScope:
     """One tenant's CMMC asset-scope determination: a default category for
     everything collected, plus named exceptions. Defaults to CUI_ASSET so
-    a tenant with nothing to exclude needs this block at all."""
+    a tenant with nothing to exclude doesn't need this block at all."""
     default: AssetCategory = AssetCategory.CUI_ASSET
     exceptions: List[AssetException] = field(default_factory=list)
 
@@ -207,6 +207,22 @@ def apply_asset_scope(collection, scope: AssetScope) -> ScopeApplicationResult:
     also returns a ScopeApplicationResult summarizing what happened, for
     the report to disclose.
     """
+    # Defense in depth: tenant_config_loader.py already rejects
+    # default: out_of_scope at config-load time, but this function has no
+    # way to know whether every caller goes through that loader (e.g. a
+    # test, or a future config path). A default of Out-of-Scope would
+    # exclude every endpoint and every user with no exception declared for
+    # them — silently emptying the whole collection before scoring ever
+    # runs, which is the single most misleading artifact this tool could
+    # produce. Checked here too, not just at the edge.
+    if scope.default is AssetCategory.OUT_OF_SCOPE:
+        raise ValueError(
+            "asset_scope.default cannot be 'out_of_scope' — this would exclude the "
+            "entire environment from assessment. Use cui_asset (or another "
+            "non-excluding category) as the default, and list specific "
+            "out-of-scope assets as exceptions instead."
+        )
+
     result = ScopeApplicationResult()
     result.total_endpoints_seen = len(collection.endpoints)
     result.total_users_seen = sum(1 for o in collection.ad_objects if o.object_class == "user")
@@ -226,7 +242,19 @@ def apply_asset_scope(collection, scope: AssetScope) -> ScopeApplicationResult:
             ep.metadata = dict(ep.metadata or {})
             ep.metadata["asset_category"] = category.value
             ep.metadata["asset_category_reason"] = exc.reason if exc else ""
-            result.documented_endpoints[ep.hostname] = exc
+            # exc is None whenever this category came from scope.default
+            # rather than a matched exception (e.g. a tenant configured
+            # with default: crma) — documented_endpoints is typed
+            # Dict[str, AssetException], and report code reads
+            # exc.category/.reason directly, so storing None here would
+            # raise a real AttributeError the first time that report
+            # section renders. A synthetic exception with an honest reason
+            # keeps the type contract intact instead of special-casing
+            # None at every call site downstream.
+            result.documented_endpoints[ep.hostname] = exc or AssetException(
+                identifier_type="hostname", identifier=ep.hostname,
+                category=category, reason="(tenant default category — no explicit exception declared)",
+            )
         kept_endpoints.append(ep)
     collection.endpoints = kept_endpoints
 
@@ -250,7 +278,13 @@ def apply_asset_scope(collection, scope: AssetScope) -> ScopeApplicationResult:
             obj.attributes = dict(obj.attributes or {})
             obj.attributes["asset_category"] = category.value
             obj.attributes["asset_category_reason"] = exc.reason if exc else ""
-            result.documented_users[identifier] = exc
+            # Same None-guard as the endpoint loop above — exc is None
+            # whenever this came from scope.default rather than a matched
+            # exception.
+            result.documented_users[identifier] = exc or AssetException(
+                identifier_type="user", identifier=identifier,
+                category=category, reason="(tenant default category — no explicit exception declared)",
+            )
         kept_ad_objects.append(obj)
     collection.ad_objects = kept_ad_objects
 

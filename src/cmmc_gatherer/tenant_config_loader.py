@@ -124,6 +124,16 @@ def _build_profile(entry: Dict[str, Any], index: int, config_path: str) -> Tenan
             f"{config_path}: tenant '{tenant_key}' must specify at least one plane "
             f"under 'planes:' — valid values: {[p.value for p in Plane]}"
         )
+    if not isinstance(planes_raw, list):
+        # A plain string (e.g. "planes: cloud" instead of "planes: [cloud]")
+        # would otherwise iterate character-by-character below and fail
+        # with a confusing "invalid plane 'c'" — this gives the real,
+        # actionable error for what is a very easy YAML typo to make.
+        raise TenantConfigError(
+            f"{config_path}: tenant '{tenant_key}' has 'planes:' set to a single "
+            f"value ('{planes_raw}') instead of a list — write it as "
+            f"'planes: [{planes_raw}]' or as a YAML block list"
+        )
     planes = []
     for p in planes_raw:
         try:
@@ -226,6 +236,15 @@ def _build_asset_scope(scope_cfg: Any, tenant_key: str, config_path: str) -> Opt
             f"{config_path}: tenant '{tenant_key}' has invalid asset_scope default "
             f"'{default_raw}' — valid values: {[c.value for c in AssetCategory]}"
         )
+    if default_category is AssetCategory.OUT_OF_SCOPE:
+        raise TenantConfigError(
+            f"{config_path}: tenant '{tenant_key}' sets asset_scope.default to "
+            f"'out_of_scope', which would exclude the entire environment from "
+            f"assessment before any scoring even runs — the single most misleading "
+            f"artifact this tool could produce. Set a default of cui_asset (or "
+            f"another non-excluding category) and list specific out-of-scope assets "
+            f"as exceptions instead."
+        )
 
     exceptions: List[AssetException] = []
 
@@ -271,8 +290,23 @@ def _build_asset_scope(scope_cfg: Any, tenant_key: str, config_path: str) -> Opt
 
     csv_path = scope_cfg.get("exceptions_file")
     if csv_path:
+        # Resolve relative to the CONFIG FILE's own directory, not the
+        # process's current working directory — otherwise
+        # "python run_assessment.py --config C:\clients\acme\tenants.yaml"
+        # won't find "acme_asset_exceptions.csv" sitting right next to that
+        # config file unless the terminal also happens to be cd'd there. An
+        # already-absolute path is left untouched.
+        resolved_path = csv_path
+        if not Path(csv_path).is_absolute():
+            candidate = Path(config_path).parent / csv_path
+            if candidate.exists():
+                resolved_path = str(candidate)
+            # else: fall through and let load_exceptions_csv try csv_path
+            # as given (relative to CWD) — preserves the old behavior for
+            # anyone already relying on running from a specific directory,
+            # while fixing the common case of a config passed by full path.
         try:
-            exceptions.extend(load_exceptions_csv(csv_path))
+            exceptions.extend(load_exceptions_csv(resolved_path))
         except ValueError as e:
             raise TenantConfigError(
                 f"{config_path}: tenant '{tenant_key}' asset_scope.exceptions_file error: {e}"

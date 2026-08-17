@@ -49,18 +49,27 @@ class CollectionHealthRecorder(logging.Handler):
         self.entries: List[HealthLogEntry] = []
 
     def emit(self, record: logging.LogRecord) -> None:
-        # A logging handler must never itself raise — that could break
-        # logging for the rest of the run. Malformed record -> drop it
-        # silently rather than risk that.
         try:
             self.entries.append(HealthLogEntry(
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                # record.created is the epoch timestamp the logging module
+                # itself set at the moment the LogRecord was created — using
+                # datetime.now() here instead measured the time this HANDLER
+                # got around to processing it, which drifts under any
+                # buffering and is off by however long emit() takes to run.
+                # record.created is the actual, correct source of truth.
+                timestamp=datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
                 level=record.levelname,
                 source=record.name,
                 message=record.getMessage(),
             ))
         except Exception:
-            pass
+            # A logging handler must never itself raise — that could break
+            # logging for the rest of the run. handleError (not a bare
+            # except: pass) respects logging.raiseExceptions and prints
+            # the real traceback to stderr in debug scenarios, rather than
+            # silently hiding a genuine formatting bug in this handler
+            # itself, which a bare pass would do.
+            self.handleError(record)
 
     @staticmethod
     def readable_source(dotted_name: str) -> str:

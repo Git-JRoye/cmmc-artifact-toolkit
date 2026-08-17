@@ -92,17 +92,29 @@ class TenantOrchestrator:
         # collection_health.py. try/finally so the handler is always
         # removed even if something below raises unexpectedly; leaving it
         # attached would leak into every subsequent tenant's run.
+        #
+        # PILOT FINDING (real, confirmed via code review): this used to
+        # detach the handler immediately after the two plane try/excepts,
+        # BEFORE _merge_endpoints and apply_asset_scope ran — but
+        # apply_asset_scope is exactly where the config-drift warning
+        # (an asset_scope exception that never matched a real device/user)
+        # gets logged. That warning was reaching the console but silently
+        # never reaching health_log or the report's Collection Health page,
+        # which is the one place USER_GUIDE_SINGLE_ORG.md §6 promises it
+        # would show up. The handler now stays attached through both of
+        # those steps, not just plane collection.
         health_recorder = CollectionHealthRecorder()
         cmmc_logger = logging.getLogger("cmmc_gatherer")
         cmmc_logger.addHandler(health_recorder)
         try:
             if profile.runs_onprem():
                 try:
-                    ep, ad, ev, po = self._run_onprem(profile)
+                    ep, ad, ev, po, onprem_errors = self._run_onprem(profile)
                     onprem_endpoints += ep
                     ad_objects += ad
                     events += ev
                     policies += po
+                    errors += onprem_errors
                 except Exception as e:
                     logger.error("[%s] on-prem plane failed: %s", profile.tenant_key, e)
                     errors.append(f"onprem: {e}")
@@ -118,42 +130,42 @@ class TenantOrchestrator:
                 except Exception as e:
                     logger.error("[%s] cloud plane failed: %s", profile.tenant_key, e)
                     errors.append(f"cloud: {e}")
-        finally:
-            cmmc_logger.removeHandler(health_recorder)
 
-        endpoints = self._merge_endpoints(onprem_endpoints, cloud_endpoints)
-        merged_count = len(onprem_endpoints) + len(cloud_endpoints) - len(endpoints)
-        if merged_count:
+            endpoints = self._merge_endpoints(onprem_endpoints, cloud_endpoints)
+            merged_count = len(onprem_endpoints) + len(cloud_endpoints) - len(endpoints)
+            if merged_count:
+                logger.info(
+                    "[%s] merged %d hybrid-managed device(s) (matched by hostname across "
+                    "on-prem + Intune) so they aren't double-counted as separate endpoints",
+                    profile.tenant_key, merged_count,
+                )
+
+            collection = ArtifactCollection(
+                endpoints=endpoints,
+                ad_objects=ad_objects,
+                security_events=events,
+                policies=policies,
+            )
             logger.info(
-                "[%s] merged %d hybrid-managed device(s) (matched by hostname across "
-                "on-prem + Intune) so they aren't double-counted as separate endpoints",
-                profile.tenant_key, merged_count,
+                "[%s] collection complete: %d endpoint(s), %d AD/identity object(s), "
+                "%d event(s), %d policy record(s), %d error(s)",
+                profile.tenant_key, len(endpoints), len(ad_objects), len(events),
+                len(policies), len(errors),
             )
 
-        collection = ArtifactCollection(
-            endpoints=endpoints,
-            ad_objects=ad_objects,
-            security_events=events,
-            policies=policies,
-        )
-        logger.info(
-            "[%s] collection complete: %d endpoint(s), %d AD/identity object(s), "
-            "%d event(s), %d policy record(s), %d error(s)",
-            profile.tenant_key, len(endpoints), len(ad_objects), len(events),
-            len(policies), len(errors),
-        )
-
-        # Apply CMMC asset-scope categorization AFTER full collection, not
-        # during it — collection always sees the whole reachable
-        # environment first; scope filtering is a distinct, separate step
-        # on top of that, so the two concerns never get tangled together.
-        # None means no asset_scope was configured for this tenant at all
-        # (e.g. a GCC High client whose entire environment is genuinely in
-        # scope) — nothing to apply, no CMMC Assessment Scope section will
-        # render for it.
-        scope_result = None
-        if profile.asset_scope is not None:
-            scope_result = apply_asset_scope(collection, profile.asset_scope)
+            # Apply CMMC asset-scope categorization AFTER full collection, not
+            # during it — collection always sees the whole reachable
+            # environment first; scope filtering is a distinct, separate step
+            # on top of that, so the two concerns never get tangled together.
+            # None means no asset_scope was configured for this tenant at all
+            # (e.g. a GCC High client whose entire environment is genuinely in
+            # scope) — nothing to apply, no CMMC Assessment Scope section will
+            # render for it.
+            scope_result = None
+            if profile.asset_scope is not None:
+                scope_result = apply_asset_scope(collection, profile.asset_scope)
+        finally:
+            cmmc_logger.removeHandler(health_recorder)
 
         return TenantRunResult(
             tenant_key=profile.tenant_key,
@@ -185,8 +197,22 @@ class TenantOrchestrator:
         only ever come from on-prem collection — and folds the Intune record
         into metadata['intune'] so compliance state, encryption, and
         management state are preserved for reporting rather than discarded.
+
+        PILOT FINDING (real, confirmed via code review): the merged record
+        used to be built by naming eight Endpoint fields explicitly in a
+        constructor call. Any field added to Endpoint later that isn't in
+        that list would be silently dropped for hybrid devices ONLY — a bug
+        that would only appear in the one configuration (hybrid on-prem +
+        cloud) this project has never actually run end-to-end yet, and
+        would surface as hybrid devices mysteriously missing data that both
+        pure on-prem and pure cloud devices still show correctly. Now uses
+        dataclasses.replace(), which copies every field from the on-prem
+        record except metadata (explicitly overridden below) — immune to
+        future fields being added to Endpoint without this method also
+        being updated.
         """
-        from .models.artifacts import Endpoint
+        import dataclasses
+        from .models.artifacts import Endpoint  # noqa: F401 (kept for readability; replace() needs no explicit class ref)
 
         cloud_by_host: Dict[str, List] = {}
         for ep in cloud:
@@ -204,21 +230,28 @@ class TenantOrchestrator:
                 merged.append(ep)
                 continue
 
+            # PILOT FINDING (real, confirmed via code review): only
+            # matches[0] was ever merged and added to used_cloud_ids — any
+            # ADDITIONAL Intune records for the same hostname (a real,
+            # normal consequence of re-enrollment after a re-image) fell
+            # through to the final loop below and got re-appended as
+            # separate, unmerged endpoints. A re-imaged machine would then
+            # be counted twice with no warning anywhere. Logged here now,
+            # which — with the health-recorder scope fix above — lands on
+            # the report's Collection Health page, not just the console.
+            if len(matches) > 1:
+                logger.warning(
+                    "%s has %d Intune records; merged the first and left %d unmerged — "
+                    "likely stale enrollment record(s) from a prior re-image/re-enrollment",
+                    ep.hostname, len(matches), len(matches) - 1,
+                )
+
             cloud_ep = matches[0]  # multiple Intune records for one hostname would be unusual
             used_cloud_ids.add(id(cloud_ep))
             combined_metadata = dict(ep.metadata or {})
             combined_metadata["sources"] = ["onprem", "intune"]
             combined_metadata["intune"] = dict(cloud_ep.metadata or {})
-            merged.append(Endpoint(
-                hostname=ep.hostname,
-                ip_address=ep.ip_address,
-                os_version=ep.os_version,
-                installed_updates=ep.installed_updates,
-                security_products=ep.security_products,
-                firewall_status=ep.firewall_status,
-                antivirus_status=ep.antivirus_status,
-                metadata=combined_metadata,
-            ))
+            merged.append(dataclasses.replace(ep, metadata=combined_metadata))
 
         for ep in cloud:
             if id(ep) not in used_cloud_ids:
@@ -231,6 +264,7 @@ class TenantOrchestrator:
     def _run_onprem(self, profile: TenantProfile):
         """Run the four on-prem collectors. Each failure is isolated, not fatal."""
         endpoints, ad_objects, events, policies = [], [], [], []
+        errors: List[str] = []
 
         for name, fn in [
             ("endpoint", lambda: EndpointCollector(demo=self.demo).collect()),
@@ -246,6 +280,16 @@ class TenantOrchestrator:
                 result = fn()
             except Exception as e:
                 logger.error("on-prem %s collector failed: %s", name, e)
+                # PILOT FINDING (real, confirmed via code review): this used
+                # to only log, never append to any errors list — meaning
+                # TenantRunResult.errors stayed [] for ANY on-prem collector
+                # failure, and the pilot harness would print "No errors
+                # reported" for a run where, say, the AD collector genuinely
+                # died. Given that collector is explicitly documented as
+                # never having run against a real domain controller, this
+                # was exactly the failure most likely to happen and least
+                # likely to be noticed. Now matches _run_cloud's own pattern.
+                errors.append(f"onprem_{name}: {e}")
                 continue
             if name == "endpoint":
                 endpoints = result
@@ -256,7 +300,7 @@ class TenantOrchestrator:
             elif name == "policy":
                 policies = result
 
-        return endpoints, ad_objects, events, policies
+        return endpoints, ad_objects, events, policies, errors
 
     def _run_cloud(self, profile: TenantProfile):
         """Build a Graph client for this tenant's cloud/auth, then run cloud collectors."""

@@ -1092,6 +1092,41 @@ class MSPReportExporter(ExporterBase):
             </div>
         </div>"""
 
+    @staticmethod
+    def _collapse_repeated_health_entries(health_log: List[Any]) -> List[tuple]:
+        """Group near-identical health log entries — the same per-user or
+        per-device warning repeated across many items, differing only in an
+        embedded GUID (a user id, a device id) — so a large tenant's health
+        page doesn't balloon into hundreds of nearly-identical rows. A real
+        example from this project's own pilot: 5 separate rows, one per
+        user, all reading "Could not fetch authentication method detail
+        for user <guid>: 403 ...". At Tenguard's scale (5 users) that's
+        already 5 rows; at a real MSP client's scale (hundreds of users)
+        the exact same one real problem would otherwise render as hundreds
+        of rows.
+
+        GUID-shaped tokens are replaced with a placeholder before grouping,
+        since that's the actual variable part in every real per-item
+        warning this project logs today. Returns (representative_entry,
+        total_count) tuples — the representative is the earliest
+        occurrence, consistent with showing when a recurring problem
+        first appeared.
+        """
+        import re
+        guid_pattern = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', re.IGNORECASE)
+
+        groups: Dict[tuple, List] = {}
+        order: List[tuple] = []
+        for e in health_log:
+            normalized_msg = guid_pattern.sub('<id>', e.message)
+            key = (e.source, e.level, normalized_msg)
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(e)
+
+        return [(groups[key][0], len(groups[key])) for key in order]
+
     def _generate_collection_health_page(self, health_log: List[Any], customer_name: Optional[str],
                                           assessment_id: Optional[str], back_href: str) -> str:
         """Standalone page listing every WARNING/ERROR logged during this
@@ -1114,16 +1149,18 @@ class MSPReportExporter(ExporterBase):
                 f"                <tr><td>{src}</td><td>{count}</td></tr>\n"
                 for src, count in sorted(by_source.items(), key=lambda kv: -kv[1])
             )
+            collapsed = self._collapse_repeated_health_entries(health_log)
             entry_rows = []
             # Errors first, then warnings, each newest-first — the thing
             # most likely to need attention should be easiest to find.
-            for e in sorted(health_log, key=lambda e: (e.level != 'ERROR', e.timestamp), reverse=False):
+            for e, count in sorted(collapsed, key=lambda item: (item[0].level != 'ERROR', item[0].timestamp), reverse=False):
                 level_color = 'status-bad' if e.level == 'ERROR' else 'status-warn'
                 src = CollectionHealthRecorder.readable_source(e.source)
+                repeat_note = f' <span class="na">(×{count - 1} more similar)</span>' if count > 1 else ""
                 entry_rows.append(
                     f"                <tr><td>{e.timestamp}</td>"
                     f"<td><span class=\"{level_color}\">{e.level}</span></td>"
-                    f"<td>{src}</td><td>{e.message}</td></tr>\n"
+                    f"<td>{src}</td><td>{e.message}{repeat_note}</td></tr>\n"
                 )
             body = f"""            <p>{len(health_log)} entr{'y' if len(health_log) == 1 else 'ies'} logged during this run.</p>
             <table>

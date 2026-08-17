@@ -29,6 +29,23 @@ evidence types get added over time:
    client relying on this report) should be able to tell the difference at
    a glance.
 
+   THE RULE THAT ACTUALLY MATTERS, stated explicitly after a real
+   inconsistency in applying it was caught by external review: an Intune
+   compliance policy REQUIREMENT (e.g. "storage encryption is required")
+   is NOT the same epistemic class as OBSERVED DEVICE STATE (e.g.
+   "real-time protection is currently running on this specific device").
+   A requirement with no observation that any device actually meets it is
+   SUPPORTING at best — it shows intent, not fact. Only evidence of an
+   actual, observed state on a real device earns DIRECT. This project
+   previously marked storage_encryption_requirement and
+   malware_protection_requirement as DIRECT while correctly marking the
+   equivalent firewall_policy_requirement as SUPPORTING — the same
+   requirement-vs-state distinction applies to all three identically, and
+   the first two were wrong. Corrected below; if a future evidence type's
+   confidence is ever in question, this is the test to apply: does this
+   prove something IS true on a device, or only that something is
+   DEMANDED of it?
+
 HONEST SCOPE NOTE: this registry only contains practices for evidence this
 toolkit actually collects today. It is not, and does not attempt to be, a
 complete CMMC Level 1/2 practice list — a large fraction of CMMC practices
@@ -216,7 +233,7 @@ EVIDENCE_MAP: List[EvidenceMapping] = [
     ),
     EvidenceMapping(
         "storage_encryption_requirement", "Storage encryption required by Intune compliance policy",
-        ["SC.L2-3.13.16"], Confidence.DIRECT,
+        ["SC.L2-3.13.16"], Confidence.SUPPORTING,
     ),
     EvidenceMapping(
         "firewall_policy_requirement", "Active firewall required by Intune compliance policy",
@@ -224,7 +241,7 @@ EVIDENCE_MAP: List[EvidenceMapping] = [
     ),
     EvidenceMapping(
         "malware_protection_requirement", "Antivirus / real-time protection required by Intune compliance policy",
-        ["SI.L1-3.14.2"], Confidence.DIRECT,
+        ["SI.L1-3.14.2"], Confidence.SUPPORTING,
     ),
     EvidenceMapping(
         "patch_management_policy", "Windows Update Ring deferral and automatic-install configuration",
@@ -264,7 +281,7 @@ EVIDENCE_MAP: List[EvidenceMapping] = [
     ),
     EvidenceMapping(
         "device_sanitization_events", "Record of remote wipe/retire actions actually taken (Intune device-management audit log)",
-        ["MP.L1-3.8.3"], Confidence.DIRECT,
+        ["MP.L1-3.8.3"], Confidence.SUPPORTING,
     ),
     EvidenceMapping(
         "audit_log_collection", "Security event and audit log collection (on-prem Event Log + Entra sign-in/audit logs)",
@@ -305,6 +322,21 @@ EVIDENCE_MAP: List[EvidenceMapping] = [
 ]
 
 _EVIDENCE_BY_KEY: Dict[str, EvidenceMapping] = {e.evidence_key: e for e in EVIDENCE_MAP}
+
+# Catch a typo'd or forgotten practice_id at IMPORT time, not at report-render
+# time. Without this, a bad practice_id in a new EvidenceMapping entry surfaces
+# as a bare KeyError deep inside practices_for_evidence/domain_coverage, only
+# once a report happens to render that specific evidence — i.e. well after
+# collection has already run. Failing fast here means a typo is caught the
+# moment this module is imported, not discovered mid-assessment.
+_unknown_practice_ids = {
+    pid for ev in EVIDENCE_MAP for pid in ev.practice_ids
+} - PRACTICES.keys()
+assert not _unknown_practice_ids, (
+    f"control_mapping.EVIDENCE_MAP references practice_id(s) not present in "
+    f"PRACTICES: {sorted(_unknown_practice_ids)} — add them to PRACTICES or "
+    f"fix the typo before this evidence type can be used anywhere."
+)
 
 
 def get_practice(practice_id: str) -> Practice:
