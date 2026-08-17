@@ -445,124 +445,6 @@ class MSPReportExporter(ExporterBase):
 {coverage_notes_html}
 """
 
-        # ── Device Protection Status (combined on-prem + cloud) ─────────
-        # Tag each endpoint with its plane from the list it actually came
-        # from (the same split _onprem_endpoints/_cloud_endpoints already
-        # use), rather than re-guessing cloud-ness from metadata shape.
-        all_eps = [(ep, False) for ep in onprem_eps] + [(ep, True) for ep in cloud_eps]
-        if all_eps:
-            fw_ok = 0
-            mde_ok = 0
-            rtp_ok = 0
-            device_rows = ""
-            for ep, is_cloud in all_eps:
-                meta = ep.metadata or {}
-
-                # Firewall
-                if is_cloud:
-                    cfw = meta.get('cloud_firewall_status')
-                    if cfw == 'Enabled':
-                        fw_cell = '<span class="status-good">Enabled</span>'
-                        fw_ok += 1
-                    elif cfw == 'Disabled':
-                        fw_cell = '<span class="status-bad">Disabled</span>'
-                    elif cfw:
-                        fw_cell = f'<span class="status-warn">{cfw}</span>'
-                    elif meta.get('cloud_firewall_lookup_failed'):
-                        fw_cell = '<span class="status-warn">Lookup failed</span>'
-                    else:
-                        fw_cell = '<span class="na">Not checked</span>'
-                else:
-                    if ep.firewall_status == 'Enabled':
-                        fw_cell = '<span class="status-good">Enabled</span>'
-                        fw_ok += 1
-                    elif ep.firewall_status == 'Partial':
-                        fw_cell = '<span class="status-warn">Partial</span>'
-                    elif ep.firewall_status:
-                        fw_cell = f'<span class="status-bad">{ep.firewall_status}</span>'
-                    else:
-                        fw_cell = '<span class="na">N/A</span>'
-
-                # MDE onboarding
-                mde_status = meta.get('mde_atp_onboarding_status')
-                if mde_status and mde_status.lower() in ('onboarded', 'sufficient'):
-                    mde_cell = '<span class="status-good">Onboarded</span>'
-                    mde_ok += 1
-                elif mde_status:
-                    mde_cell = f'<span class="status-bad">{mde_status}</span>'
-                else:
-                    # Check intune sub-metadata for merged devices
-                    intune_meta = meta.get('intune', {})
-                    mde_intune = intune_meta.get('mde_atp_onboarding_status') if isinstance(intune_meta, dict) else None
-                    if mde_intune and mde_intune.lower() in ('onboarded', 'sufficient'):
-                        mde_cell = '<span class="status-good">Onboarded</span>'
-                        mde_ok += 1
-                    elif mde_intune:
-                        mde_cell = f'<span class="status-bad">{mde_intune}</span>'
-                    else:
-                        mde_cell = '<span class="na">N/A</span>'
-
-                # Real-time protection
-                if is_cloud:
-                    rtp_val = meta.get('defender_realtime_protection_enabled')
-                    if rtp_val is True:
-                        rtp_cell = '<span class="status-good">Active</span>'
-                        rtp_ok += 1
-                    elif rtp_val is False:
-                        rtp_cell = '<span class="status-bad">Inactive</span>'
-                    elif meta.get('defender_protection_lookup_failed'):
-                        rtp_cell = '<span class="status-warn">Lookup failed</span>'
-                    else:
-                        rtp_cell = '<span class="na">Not checked</span>'
-                else:
-                    if ep.antivirus_status == 'Active':
-                        rtp_cell = '<span class="status-good">Active</span>'
-                        rtp_ok += 1
-                    elif ep.antivirus_status:
-                        rtp_cell = f'<span class="status-bad">{ep.antivirus_status}</span>'
-                    else:
-                        rtp_cell = '<span class="na">N/A</span>'
-
-                device_rows += (
-                    f"                <tr><td>{ep.hostname}</td>"
-                    f"<td>{fw_cell}</td>"
-                    f"<td>{mde_cell}</td>"
-                    f"<td>{rtp_cell}</td></tr>\n"
-                )
-
-            total = len(all_eps)
-            html += f"""        <div class="section" id="sec-device-protection">
-            <h2>Device Protection Status</h2>
-            <p style="margin-bottom:12px;color:#64748b;font-size:0.95em;">
-                Combined view of all endpoints (on-prem + cloud-managed).
-                Maps to CMMC controls:
-                <strong>SC.L1-3.13.1</strong> (boundary protection),
-                <strong>SI.L1-3.14.2</strong> (malicious code protection),
-                <strong>SI.L2-3.14.3</strong> (security alerts &amp; advisories).
-            </p>
-            <div style="display:flex;gap:16px;margin-bottom:18px;flex-wrap:wrap;">
-                <div style="background:#e8f5e9;border-radius:8px;padding:16px 28px;text-align:center;min-width:180px;">
-                    <div style="font-size:1.5em;font-weight:700;color:#2f7d4f;">{fw_ok}/{total}</div>
-                    <div style="font-size:0.92em;color:#2f7d4f;margin-top:4px;">Firewall Enabled</div>
-                </div>
-                <div style="background:#e8f5e9;border-radius:8px;padding:16px 28px;text-align:center;min-width:180px;">
-                    <div style="font-size:1.5em;font-weight:700;color:#2f7d4f;">{mde_ok}/{total}</div>
-                    <div style="font-size:0.92em;color:#2f7d4f;margin-top:4px;">MDE Onboarded</div>
-                </div>
-                <div style="background:#e8f5e9;border-radius:8px;padding:16px 28px;text-align:center;min-width:180px;">
-                    <div style="font-size:1.5em;font-weight:700;color:#2f7d4f;">{rtp_ok}/{total}</div>
-                    <div style="font-size:0.92em;color:#2f7d4f;margin-top:4px;">Real-Time Protection Active</div>
-                </div>
-            </div>
-            <table>
-                <tr>
-                    <th>Hostname</th><th>Firewall</th>
-                    <th>MDE (Endpoint Detection)</th><th>Real-Time Protection</th>
-                </tr>
-{device_rows}            </table>
-        </div>
-"""
-
         if onprem_eps:
             html += f"""        <div class="section" id="sec-onprem-endpoints">
             <h2>On-Prem Endpoint Status</h2>
@@ -570,7 +452,8 @@ class MSPReportExporter(ExporterBase):
             <table>
                 <tr>
                     <th>Hostname</th><th>IP Address</th><th>OS Version</th>
-                    <th>Firewall</th><th>Antivirus</th><th>Also Cloud-Managed (Intune)</th>
+                    <th>Firewall</th><th>Antivirus</th><th>MDE Onboarded</th>
+                    <th>Also Cloud-Managed (Intune)</th>
                     <th>Installed Software</th>
                 </tr>
 """
@@ -598,6 +481,7 @@ class MSPReportExporter(ExporterBase):
                     f"<td>{ep.os_version}</td>"
                     f"<td><span class=\"{fw_color}\">{ep.firewall_status or 'Unknown'}{fw_note}</span></td>"
                     f"<td><span class=\"{av_color}\">{ep.antivirus_status or 'Unknown'}</span></td>"
+                    f"<td>{self._mde_onboarding_cell(ep)}</td>"
                     f"<td>{cloud_cell}</td>"
                     f"<td>{self._software_cell(ep, software_href)}</td>"
                     f"</tr>\n"
@@ -612,6 +496,7 @@ class MSPReportExporter(ExporterBase):
                 <tr>
                     <th>Hostname</th><th>OS Version</th><th>Compliance State</th>
                     <th>Encrypted</th><th>Recovery Key Escrowed</th><th>Firewall</th><th>Real-Time Protection</th>
+                    <th>MDE Onboarded</th>
                     <th>Management State</th><th>Ownership</th><th>Owner</th>
                     <th>Installed Software</th>
                 </tr>
@@ -672,6 +557,7 @@ class MSPReportExporter(ExporterBase):
                     f"<td>{escrow_cell}</td>"
                     f"<td>{fw_cell}</td>"
                     f"<td>{rtp_cell}</td>"
+                    f"<td>{self._mde_onboarding_cell(ep)}</td>"
                     f"<td>{meta.get('management_state', 'Unknown')}</td>"
                     f"<td>{ownership_cell}</td>"
                     f"<td>{meta.get('owner_upn', 'Unknown')}</td>"
@@ -1955,6 +1841,44 @@ class MSPReportExporter(ExporterBase):
         """
         profiles = (ep.metadata or {}).get('firewall_profiles') or []
         return [p.get('Name', 'Unknown') for p in profiles if not p.get('Enabled')]
+
+    @staticmethod
+    def _mde_onboarding_cell(ep: Any) -> str:
+        """Render this endpoint's Microsoft Defender for Endpoint (MDE)
+        onboarding status — sourced from DefenderDeviceCollector's real
+        Machine.onboardingStatus field (orchestrator._apply_mde_atp_data),
+        joined by Azure AD device id, not the unconfirmed export-report
+        columns intune_device_collector.py's own mde_agent_* fields come
+        from.
+
+        Checked in two places, same reasoning as the firewall/software
+        cells elsewhere in this file: a standalone Intune device carries
+        mde_atp_onboarding_status directly in its own metadata, but a
+        hybrid device (on-prem + Intune, matched by hostname in
+        orchestrator._merge_endpoints) has its Intune-sourced fields
+        folded into metadata['intune'] instead, since the on-prem record
+        is what survives the merge. Checking only the top level would
+        silently show "N/A" for every hybrid device even when MDE data
+        was actually collected for it.
+
+        A genuinely on-prem-only device with no matching cloud/Intune
+        record at all (never appears in DefenderDeviceCollector's results,
+        since that's an Intune-device-id join) correctly shows "N/A" here
+        — not a bug, there's no MDE relationship to report for a machine
+        Intune has never heard of.
+        """
+        meta = ep.metadata or {}
+        status = meta.get('mde_atp_onboarding_status')
+        if status is None:
+            intune_meta = meta.get('intune')
+            if isinstance(intune_meta, dict):
+                status = intune_meta.get('mde_atp_onboarding_status')
+
+        if status and status.lower() in ('onboarded', 'sufficient'):
+            return '<span class="status-good">Onboarded</span>'
+        if status:
+            return f'<span class="status-bad">{status}</span>'
+        return '<span class="na">N/A</span>'
 
     @staticmethod
     def _software_list(ep: Any) -> List[Dict[str, Any]]:
