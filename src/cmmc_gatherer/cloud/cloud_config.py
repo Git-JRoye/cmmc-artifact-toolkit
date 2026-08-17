@@ -13,6 +13,20 @@ GCC High clients with different access methods:
 NOTE: Endpoints below are correct to the best of current knowledge but the gov
 cloud boundaries evolve — verify against Microsoft's "national cloud deployment"
 documentation before production use, especially for GCC High / DoD.
+
+HONEST CONFIDENCE NOTE on mde_base (Microsoft Defender for Endpoint API):
+the commercial/GCC value (api.securitycenter.microsoft.com) is a real,
+well-documented, stable MDE API host — low risk. The GCC High and DoD
+values are NOT independently verified, and — unlike every other pair of
+gov-cloud endpoints in this file, which use genuinely different hostnames
+for GCC High vs. DoD (graph.microsoft.us vs. dod-graph.microsoft.us,
+login.microsoftonline.us shared) — both currently point at the exact same
+host (api-gcc.securitycenter.microsoft.us). That symmetry is suspicious
+given the pattern everywhere else in this file, not reassuring: verify
+the real DoD MDE API host against current Microsoft documentation before
+this is ever used against an actual DoD tenant. Pointing a DoD tenant's
+requests at the wrong national-cloud boundary is a real compliance
+concern, not just a bug to fix later.
 """
 
 from dataclasses import dataclass, field
@@ -32,9 +46,11 @@ class NationalCloud(str, Enum):
 
 @dataclass(frozen=True)
 class CloudEndpoints:
-    """Graph base + login authority host for a national cloud."""
+    """Graph base + login authority host + Microsoft Defender for Endpoint
+    (MDE) API base for a national cloud."""
     graph_base: str
     authority_host: str  # host only; tenant id is appended per request
+    mde_base: str        # Microsoft Defender for Endpoint API base — see module HONEST CONFIDENCE NOTE
 
     def authority(self, tenant_id: str) -> str:
         return f"https://{self.authority_host}/{tenant_id}"
@@ -43,13 +59,24 @@ class CloudEndpoints:
         # Client-credentials flow always uses the resource's /.default scope.
         return [f"{self.graph_base}/.default"]
 
+    def mde_scope(self) -> List[str]:
+        # MDE is a genuinely SEPARATE OAuth resource from Graph, not a Graph
+        # permission scope — same client-credentials /.default pattern, but
+        # against api.securitycenter.microsoft.com (or its gov-cloud
+        # equivalent) instead of graph.microsoft.com. See graph.MdeClient.
+        return [f"{self.mde_base}/.default"]
+
 
 # GCC uses the *commercial* endpoints; only GCC High and DoD move to the gov cloud.
 NATIONAL_CLOUDS: Dict[NationalCloud, CloudEndpoints] = {
-    NationalCloud.COMMERCIAL: CloudEndpoints("https://graph.microsoft.com", "login.microsoftonline.com"),
-    NationalCloud.GCC:        CloudEndpoints("https://graph.microsoft.com", "login.microsoftonline.com"),
-    NationalCloud.GCC_HIGH:   CloudEndpoints("https://graph.microsoft.us", "login.microsoftonline.us"),
-    NationalCloud.DOD:        CloudEndpoints("https://dod-graph.microsoft.us", "login.microsoftonline.us"),
+    NationalCloud.COMMERCIAL: CloudEndpoints("https://graph.microsoft.com", "login.microsoftonline.com",
+                                              "https://api.securitycenter.microsoft.com"),
+    NationalCloud.GCC:        CloudEndpoints("https://graph.microsoft.com", "login.microsoftonline.com",
+                                              "https://api.securitycenter.microsoft.com"),
+    NationalCloud.GCC_HIGH:   CloudEndpoints("https://graph.microsoft.us", "login.microsoftonline.us",
+                                              "https://api-gcc.securitycenter.microsoft.us"),
+    NationalCloud.DOD:        CloudEndpoints("https://dod-graph.microsoft.us", "login.microsoftonline.us",
+                                              "https://api-gcc.securitycenter.microsoft.us"),  # UNVERIFIED — see module docstring
 }
 
 

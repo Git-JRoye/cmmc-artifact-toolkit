@@ -82,6 +82,32 @@ Graph application permissions required:
   permission scope)
   BitLockerKey.ReadBasic.All (NEW — metadata-only recovery key existence
   check; deliberately NOT BitLockerKey.Read.All, see constraint above)
+
+HONEST CONFIDENCE NOTE on Microsoft Defender for Endpoint (MDE) device
+health (_collect_mde_health): this is a new, genuinely unverified addition,
+same "try the bulk export-job report first" approach that worked for
+firewall status. Two distinct layers of uncertainty here, not just one:
+report NAME ("DefenderAgentHealthStatus" is a best guess, not confirmed —
+if wrong, Graph's own 400 response body is expected to name the actual
+valid report(s), the same way every other wrong-guess endpoint in this
+project has been corrected from real error text rather than another
+guess), and COLUMN names within that report (genuinely unknown, so no
+$select is passed for this one — letting the report return its own
+default columns and reading several plausible candidate names per field,
+rather than compounding two guesses into one request that can fail for
+either reason with no way to tell which). Required permission is assumed,
+not confirmed, to be covered by DeviceManagementManagedDevices.Read.All
+already required above — MDE device risk/exposure data more commonly
+lives under Microsoft Defender for Endpoint's own Machine.Read.All scope
+in other integration patterns, so a permission-specific error here is a
+real, expected possible outcome, not evidence the report name is wrong.
+
+Also genuinely possible: an empty or partial result here may reflect a
+tenant that hasn't connected Microsoft Defender for Endpoint to Intune at
+all (a real, common configuration, not every Intune tenant has MDE Plan 2)
+rather than a collection failure — same "empty is not necessarily a bug"
+distinction already made for installed-software collection elsewhere in
+this project.
 """
 
 import logging
@@ -140,6 +166,23 @@ class IntuneDeviceCollector(CollectorBase):
             else:
                 logger.warning("  Could not fetch bulk firewall status report: %s", e)
 
+        # Same bulk-fetch-once, isolated-failure pattern as firewall status
+        # above — one export report call for the whole tenant, never a
+        # per-device fan-out, and a failure here must never take down the
+        # main device list.
+        mde_health: Dict[str, Dict[str, Optional[str]]] = {}
+        mde_health_lookup_failed = False
+        try:
+            mde_health = self._collect_mde_health()
+        except Exception as e:
+            mde_health_lookup_failed = True
+            detail = getattr(getattr(e, "response", None), "text", None)
+            if detail:
+                logger.warning("  Could not fetch bulk MDE device health report: %s | Response: %s",
+                                e, detail[:500])
+            else:
+                logger.warning("  Could not fetch bulk MDE device health report: %s", e)
+
         try:
             for d in self.graph.get_all("deviceManagement/managedDevices", params=params):
                 ep = self._map(d)
@@ -180,6 +223,20 @@ class IntuneDeviceCollector(CollectorBase):
                 # from "not applicable".
                 ep.metadata["cloud_firewall_status"] = firewall_statuses.get((ep.hostname or "").upper())
                 ep.metadata["cloud_firewall_lookup_failed"] = firewall_lookup_failed
+
+                # Microsoft Defender for Endpoint device health, same bulk
+                # export + hostname join as firewall status above. A device
+                # with no entry (whole export failed, or this device isn't
+                # onboarded to MDE at all) reads as None for every field —
+                # never guessed at — with mde_health_lookup_failed telling
+                # the caller WHY: a real lookup failure, versus this device
+                # simply not being present in an otherwise-successful report.
+                device_mde = mde_health.get((ep.hostname or "").upper()) or {}
+                ep.metadata["mde_sensor_health"] = device_mde.get("sensor_health")
+                ep.metadata["mde_onboarding_status"] = device_mde.get("onboarding_status")
+                ep.metadata["mde_risk_level"] = device_mde.get("risk_level")
+                ep.metadata["mde_exposure_level"] = device_mde.get("exposure_level")
+                ep.metadata["mde_health_lookup_failed"] = mde_health_lookup_failed
 
                 out.append(ep)
         except Exception as e:
@@ -252,6 +309,92 @@ class IntuneDeviceCollector(CollectorBase):
             status_label = row.get("FirewallStatus_loc") or row.get("FirewallStatus")
             result[name.upper()] = status_label
         logger.info("  Firewall status (export report): %d device(s)", len(result))
+        return result
+
+    # Column-name candidates per field, checked in order (a "_loc" variant
+    # first, matching FirewallStatus's precedent that the human-readable
+    # translated column is preferable to a raw code where both exist) —
+    # NOT confirmed against a live tenant. Deliberately several guesses per
+    # field rather than one, and no $select passed to the report at all
+    # (see the module docstring's HONEST CONFIDENCE NOTE on MDE health for
+    # why): an unknown report schema and an unknown report name are two
+    # separate uncertainties, and compounding them into one request would
+    # make a failure impossible to attribute to either cause.
+    _MDE_COLUMN_CANDIDATES = {
+        "sensor_health": ("SensorHealthState_loc", "SensorHealthState",
+                           "SensorDataAgentHealthState_loc", "SensorDataAgentHealthState",
+                           "AgentHealthStatus_loc", "AgentHealthStatus"),
+        "onboarding_status": ("OnboardingStatus_loc", "OnboardingStatus",
+                               "DeviceOnboardingStatus_loc", "DeviceOnboardingStatus"),
+        "risk_level": ("RiskLevel_loc", "RiskLevel", "DeviceRiskLevel_loc", "DeviceRiskLevel"),
+        "exposure_level": ("ExposureLevel_loc", "ExposureLevel", "DeviceExposureLevel_loc",
+                            "DeviceExposureLevel"),
+    }
+    _MDE_DEVICE_NAME_CANDIDATES = ("DeviceName", "ComputerDnsName", "MachineName")
+
+    def _collect_mde_health(self) -> Dict[str, Dict[str, Optional[str]]]:
+        """Bulk-fetch Microsoft Defender for Endpoint (MDE) device health —
+        sensor health state, onboarding status, risk level, exposure level
+        — for every device, via the same Intune asynchronous export-report
+        API used by _collect_firewall_statuses above (see that method's own
+        docstring, and GraphClient.run_export_job, for the full mechanics).
+        One export call for the whole tenant; never a per-device fan-out.
+
+        Report name "DefenderAgentHealthStatus" is a best guess, not
+        confirmed. If wrong, Graph's own error response is expected to name
+        the actual valid report(s) — that response body is logged by the
+        caller (collect() above) exactly so this can be corrected from real
+        error text rather than guessed a second time, matching how every
+        other wrong-endpoint-name mistake in this project has been fixed.
+
+        No $select is sent, since the exact column names in this report are
+        also unconfirmed — letting the report return its own default
+        columns and reading several plausible candidate names per field
+        (see _MDE_COLUMN_CANDIDATES) keeps the report-name question and the
+        column-name question separable. If NONE of the candidate columns
+        are found in a real, non-empty response, the actual column names
+        from the first row are logged so the real schema is known instead
+        of guessed at again.
+
+        Returns {hostname.upper(): {"sensor_health": ..., "onboarding_status":
+        ..., "risk_level": ..., "exposure_level": ...}}. A device with no
+        entry (the whole export failed, this device isn't onboarded to MDE,
+        or the tenant has no MDE/Intune connection at all — see the module
+        docstring) must be treated as unknown by the caller, never silently
+        read as a confirmed value.
+        """
+        rows = self._beta_graph.run_export_job(report_name="DefenderAgentHealthStatus")
+        result: Dict[str, Dict[str, Optional[str]]] = {}
+        any_field_matched = False
+        for row in rows:
+            name = None
+            for name_key in self._MDE_DEVICE_NAME_CANDIDATES:
+                name = (row.get(name_key) or "").strip()
+                if name:
+                    break
+            if not name:
+                continue
+
+            device_result: Dict[str, Optional[str]] = {}
+            for field, candidates in self._MDE_COLUMN_CANDIDATES.items():
+                value = None
+                for column in candidates:
+                    value = row.get(column)
+                    if value not in (None, ""):
+                        any_field_matched = True
+                        break
+                    value = None
+                device_result[field] = value
+            result[name.upper()] = device_result
+
+        if rows and not any_field_matched:
+            sample_columns = sorted(rows[0].keys())
+            logger.warning(
+                "  MDE health report returned %d row(s) but none of the expected "
+                "columns were found — real column names appear to be: %s. "
+                "Update _MDE_COLUMN_CANDIDATES to match.", len(rows), sample_columns,
+            )
+        logger.info("  MDE device health (export report): %d device(s)", len(result))
         return result
 
     def _check_ownership_type(self, device_id: str, hostname: str) -> Optional[str]:

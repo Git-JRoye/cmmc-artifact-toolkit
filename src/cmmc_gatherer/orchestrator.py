@@ -24,9 +24,10 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
 from .cloud.cloud_config import Plane, TenantProfile
-from .cloud.graph import GraphClient, build_auth_provider
+from .cloud.graph import GraphClient, MdeClient, build_auth_provider
 from .collectors.cloud.cloud_event_collector import CloudSecurityEventCollector
 from .collectors.cloud.cloud_policy_collector import CloudPolicyCollector
+from .collectors.cloud.defender_device_collector import DefenderDeviceCollector
 from .collectors.cloud.entra_identity_collector import EntraIdentityCollector
 from .collectors.cloud.service_principal_collector import ServicePrincipalCollector
 from .collectors.cloud.intune_rbac_collector import IntuneRbacCollector
@@ -259,6 +260,40 @@ class TenantOrchestrator:
 
         return merged
 
+    # -- Defender for Endpoint enrichment -------------------------------------
+
+    @staticmethod
+    def _apply_mde_atp_data(endpoints: List, mde_by_aad_id: Dict[str, Dict], lookup_failed: bool) -> None:
+        """Join Defender for Endpoint device data (DefenderDeviceCollector)
+        into Intune-derived Endpoint records, matched by Entra (AAD) device
+        id — the same identifier both APIs reference for the same physical
+        device (see defender_device_collector.py's own docstring for why
+        hostname isn't used instead). Mutates each Endpoint's metadata dict
+        in place.
+
+        Deliberately called here, in _run_cloud(), BEFORE _merge_endpoints
+        runs — a hybrid on-prem+Intune device's MDE data needs to end up
+        nested under metadata['intune'] as part of the normal merge, the
+        same place every other Intune-only signal (cloud_firewall_status,
+        etc.) already lives for a merged device, not top-level on the
+        on-prem record that survives the merge.
+
+        Every endpoint gets all five mde_atp_* keys set, even with no match
+        or a total lookup failure (None/empty defaults) — never left
+        absent, so report code can rely on the keys always being present
+        rather than needing a .get() with a different fallback everywhere
+        this data might be read.
+        """
+        for ep in endpoints:
+            aad_id = (ep.metadata or {}).get("azure_ad_device_id")
+            data = mde_by_aad_id.get((aad_id or "").strip().lower()) if aad_id else None
+            ep.metadata["mde_atp_health_status"] = data.get("health_status") if data else None
+            ep.metadata["mde_atp_risk_score"] = data.get("risk_score") if data else None
+            ep.metadata["mde_atp_exposure_level"] = data.get("exposure_level") if data else None
+            ep.metadata["mde_atp_onboarding_status"] = data.get("onboarding_status") if data else None
+            ep.metadata["mde_atp_tags"] = data.get("tags") if data else []
+            ep.metadata["mde_atp_lookup_failed"] = lookup_failed
+
     # -- plane runners ------------------------------------------------------
 
     def _run_onprem(self, profile: TenantProfile):
@@ -314,6 +349,22 @@ class TenantOrchestrator:
         except Exception as e:
             logger.error("[%s] Intune collector failed: %s", profile.tenant_key, e)
             errors.append(f"intune: {e}")
+
+        # Isolated the same way as every other collector here: a failure
+        # (most commonly, a tenant that hasn't granted the separate
+        # WindowsDefenderATP -> Machine.Read.All permission at all — a real,
+        # expected, non-fatal case, not every client will have MDE) must
+        # never take down anything else. Always applies mde_atp_* metadata
+        # to every endpoint either way, success or failure, so those keys
+        # are never conditionally absent depending on what happened here.
+        try:
+            mde_client = MdeClient(profile, self.secret_resolver)
+            mde_by_aad_id = DefenderDeviceCollector(mde_client).collect()
+            self._apply_mde_atp_data(endpoints, mde_by_aad_id, lookup_failed=False)
+        except Exception as e:
+            logger.error("[%s] Defender for Endpoint collector failed: %s", profile.tenant_key, e)
+            errors.append(f"defender_atp: {e}")
+            self._apply_mde_atp_data(endpoints, {}, lookup_failed=True)
 
         ad_objects: List = []
         try:

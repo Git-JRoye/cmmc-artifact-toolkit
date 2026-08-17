@@ -8,6 +8,11 @@ tenant, so GCC High "just works" as long as the profile says so.
 The GraphClient targets the tenant's Graph base URL and transparently follows
 ``@odata.nextLink`` paging.
 
+Also home to ``MdeClient`` — a separate, non-Graph client for the Microsoft
+Defender for Endpoint (MDE) API, which is a genuinely different API/OAuth
+resource from Graph, not a Graph permission scope. See its own docstring
+below for why it isn't just "GraphClient with a different base URL."
+
 Requires: msal, requests  (add both to requirements.txt)
 
 The secret resolver is intentionally injected. Do NOT read secrets from the
@@ -124,6 +129,104 @@ def build_auth_provider(method: AuthMethod, secret_resolver: SecretResolver) -> 
     if method == AuthMethod.INTERACTIVE:
         return InteractiveAuth()
     raise ValueError(f"Unknown auth method: {method}")
+
+
+class MdeClient:
+    """Minimal read client for the Microsoft Defender for Endpoint (MDE)
+    API — a genuinely SEPARATE API from Microsoft Graph, hosted at its own
+    base URL (api.securitycenter.microsoft.com and its gov-cloud
+    equivalents; see cloud_config.CloudEndpoints.mde_base), authenticated
+    against its own OAuth resource/scope (CloudEndpoints.mde_scope()), not
+    a Graph permission scope.
+
+    Deliberately NOT a GraphClient variant or subclass — reusing GraphClient
+    here would imply this is "Graph, just pointed at a different base URL,"
+    which it isn't: different resource, different token, different API
+    surface entirely (/api/machines, not deviceManagement/managedDevices).
+    Matches this project's own stated principle of never forcing a fit
+    between two genuinely different things (see cloud collectors leaving
+    on-prem-only Endpoint fields None rather than approximating them).
+
+    Only AuthMethod.APP_REGISTRATION is implemented, matching every other
+    real auth path in this project today — GDAP and interactive auth are
+    unimplemented seams for Graph too (see GdapAuth/InteractiveAuth above),
+    so this doesn't duplicate two unbuilt seams for a second API before
+    either is real for the first one.
+
+    HONEST CONFIDENCE NOTE: pagination here is assumed to follow the same
+    {"value": [...], "@odata.nextLink": ...} shape GraphClient.get_all
+    expects, since MDE's public API deliberately mirrors OData conventions
+    for list endpoints like /api/machines — but this is not independently
+    verified against a live tenant. If a real pilot shows a different
+    shape (e.g. a differently-named next-page field), that's genuinely new
+    information to correct from, not evidence the overall approach is wrong.
+    """
+
+    def __init__(self, profile: TenantProfile, secret_resolver: SecretResolver):
+        if profile.auth_method != AuthMethod.APP_REGISTRATION:
+            raise NotImplementedError(
+                f"MDE auth method {profile.auth_method} is not implemented — "
+                f"only AuthMethod.APP_REGISTRATION is supported today, same as Graph auth."
+            )
+        self.profile = profile
+        self._resolve_secret = secret_resolver
+        self.base = profile.endpoints().mde_base
+        self._token: Optional[str] = None
+
+    def _headers(self) -> Dict[str, str]:
+        if self._token is None:
+            self._token = self._acquire_token()
+        return {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
+
+    def _acquire_token(self) -> str:
+        import msal  # imported lazily, same reasoning as AppRegistrationAuth.get_token
+
+        profile = self.profile
+        if not (profile.tenant_id and profile.client_id and profile.secret_ref):
+            raise ValueError(f"{profile.tenant_key}: tenant_id, client_id and secret_ref are required")
+
+        ep = profile.endpoints()
+        app = msal.ConfidentialClientApplication(
+            client_id=profile.client_id,
+            authority=ep.authority(profile.tenant_id),
+            client_credential=self._resolve_secret(profile.secret_ref),
+        )
+        # Same tenant authority as Graph auth, but a token requested FOR the
+        # MDE resource instead of Graph — this is the one, deliberate
+        # difference from AppRegistrationAuth.get_token above.
+        result = app.acquire_token_for_client(scopes=ep.mde_scope())
+        if "access_token" not in result:
+            raise RuntimeError(
+                f"{profile.tenant_key}: MDE token request failed: "
+                f"{result.get('error')} - {result.get('error_description')}"
+            )
+        return result["access_token"]
+
+    def get_all(self, path: str, params: Optional[Dict[str, str]] = None) -> Iterator[Dict[str, Any]]:
+        """Yield every item across all pages of an MDE list endpoint (e.g.
+        api/machines). Same paging/429-throttle handling as
+        GraphClient.get_all — kept as a near-duplicate rather than sharing
+        a base class with it, since the two APIs are genuinely different
+        resources and the shared code here is small enough that the
+        indirection isn't worth it."""
+        import requests
+
+        url = f"{self.base}/{path.lstrip('/')}"
+        first = True
+        while url:
+            resp = requests.get(url, headers=self._headers(), params=params if first else None, timeout=60)
+            first = False
+            if resp.status_code == 429:
+                import time
+                wait = int(resp.headers.get("Retry-After", "5"))
+                logger.warning("MDE API throttled; sleeping %ss", wait)
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            body = resp.json()
+            for item in body.get("value", []):
+                yield item
+            url = body.get("@odata.nextLink")
 
 
 class GraphClient:
