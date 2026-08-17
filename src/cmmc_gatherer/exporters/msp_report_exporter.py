@@ -214,6 +214,7 @@ class MSPReportExporter(ExporterBase):
             health_path = f"{base}_health{ext}"
             apps_path = f"{base}_apps{ext}"
             policies_path = f"{base}_policies{ext}"
+            findings_path = f"{base}_findings{ext}"
             main_filename = os.path.basename(output_path)
             software_filename = os.path.basename(software_path)
             health_filename = os.path.basename(health_path)
@@ -286,6 +287,22 @@ class MSPReportExporter(ExporterBase):
                 f.write(health_html)
             logger.info(f"Exported collection health log: {health_path}")
 
+            # Always written, same "never silently absent" reasoning as the
+            # collection health page above — a clean "no findings this run"
+            # page is itself meaningful. Deliberately NOT linked from the
+            # main report (no findings_href passed to _generate_msp_report
+            # above) and NOT referenced by filename anywhere in it: this is
+            # MSP-internal remediation guidance, not evidence to hand to a
+            # client's assessor, so the main report — the document that
+            # actually goes to the assessor — carries no trace of this
+            # file's existence.
+            findings_html = self._generate_findings_recommendations_page(
+                artifacts, customer_name, assessment_id, back_href=main_filename,
+            )
+            with open(findings_path, 'w', encoding='utf-8') as f:
+                f.write(findings_html)
+            logger.info(f"Exported findings and recommendations: {findings_path}")
+
             return True
         except Exception as e:
             logger.error(f"MSP report export failed: {e}")
@@ -328,7 +345,6 @@ class MSPReportExporter(ExporterBase):
     ) -> str:
         compliance_score = ComplianceScorer.calculate_overall_score(artifacts)
         coverage = ComplianceScorer.calculate_coverage(artifacts)
-        findings = self._generate_findings(artifacts)
         onprem_eps = self._onprem_endpoints(artifacts)
         cloud_eps = self._cloud_endpoints(artifacts)
 
@@ -734,24 +750,6 @@ class MSPReportExporter(ExporterBase):
                     f"<td><span class=\"{count_color}\">{count}</span></td></tr>\n"
                 )
             html += "            </table>\n        </div>\n"
-
-        html += """        <div class="section">
-            <h2>Findings &amp; Recommendations</h2>
-"""
-        for finding in findings:
-            finding_class = "finding critical" if finding['severity'] == 'Critical' else "finding"
-            if finding['severity'] == 'Resolved':
-                finding_class = "finding resolved"
-            html += (
-                f"            <div class=\"{finding_class}\">\n"
-                f"                <h4>{finding['title']}</h4>\n"
-                f"                <p><strong>Severity:</strong> {finding['severity']}</p>\n"
-                f"                <p><strong>Description:</strong> {finding['description']}</p>\n"
-                f"            </div>\n"
-                f"            <div class=\"recommendation\">"
-                f"<strong>Recommendation:</strong> {finding['recommendation']}</div>\n"
-            )
-        html += "        </div>\n"
 
         if artifacts.policies:
             mapped_policies = [p for p in artifacts.policies if cm.controls_for_policy(p.policy_name, p.policy_type)]
@@ -1714,6 +1712,69 @@ class MSPReportExporter(ExporterBase):
                 <tr><th>Policy</th><th>Type</th><th>Status</th><th>Current Value</th><th>CMMC Controls</th></tr>
 {"".join(rows)}
             </table>
+        </div>
+        <p class="back-link"><a href="{back_href}">&larr; Back to main compliance report</a></p>
+    </div>
+</body>
+</html>"""
+
+    def _generate_findings_recommendations_page(self, artifacts: Any, customer_name: Optional[str],
+                                                  assessment_id: Optional[str], back_href: str) -> str:
+        """Standalone findings & recommendations page — moved out of the main
+        compliance report entirely (not linked from it either) since this
+        content is MSP-internal remediation guidance, not evidence an
+        auditor/assessor needs: an assessor evaluates the underlying data
+        (endpoint status, policy compliance, AD security, etc.) directly,
+        not an MSP's own prioritized to-do list for fixing what it found.
+        The main report's own data sections (Infrastructure Overview,
+        On-Prem/Cloud device tables, Policy Compliance, Security Events,
+        etc.) already show every finding's underlying evidence; this page
+        exists purely so the MSP has somewhere to keep the
+        severity/description/recommendation writeup for their own internal
+        use, without that advisory content leaking into what gets handed
+        to a client's assessor.
+        """
+        customer_name = customer_name or "Unnamed Customer"
+        assessment_id = assessment_id or "CMMC-" + datetime.now().strftime("%Y%m%d%H%M%S")
+        findings = self._generate_findings(artifacts)
+
+        rows = []
+        for finding in findings:
+            finding_class = "finding critical" if finding['severity'] == 'Critical' else "finding"
+            if finding['severity'] == 'Resolved':
+                finding_class = "finding resolved"
+            rows.append(
+                f"            <div class=\"{finding_class}\">\n"
+                f"                <h4>{finding['title']}</h4>\n"
+                f"                <p><strong>Severity:</strong> {finding['severity']}</p>\n"
+                f"                <p><strong>Description:</strong> {finding['description']}</p>\n"
+                f"            </div>\n"
+                f"            <div class=\"recommendation\">"
+                f"<strong>Recommendation:</strong> {finding['recommendation']}</div>\n"
+            )
+
+        return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Findings &amp; Recommendations — {customer_name}</title>
+    <style>{_BASE_CSS}</style>
+</head>
+<body>
+    <div class="header">
+        <h1>Findings &amp; Recommendations</h1>
+        <div class="subtitle">{customer_name} — {assessment_id}</div>
+    </div>
+    <div class="content">
+        <p style="margin-bottom:12px;color:#64748b;font-size:0.92em;">
+            <strong>Internal MSP use only.</strong> This page is intentionally not linked from the
+            main compliance report and is not intended for delivery to a client's assessor/auditor —
+            it is prioritized remediation guidance for the MSP, not assessment evidence.
+        </p>
+        <p class="back-link"><a href="{back_href}">&larr; Back to main compliance report</a></p>
+        <div class="section" id="sec-findings-recommendations">
+            <h2>Findings &amp; Recommendations</h2>
+{"".join(rows)}
         </div>
         <p class="back-link"><a href="{back_href}">&larr; Back to main compliance report</a></p>
     </div>
