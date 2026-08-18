@@ -15,32 +15,25 @@ the current scorer, MSP report, and coverage logic work unchanged:
     Antivirus, Firewall, Disk Encryption, Account Protection, and Attack
     Surface Reduction profiles)
 
-CONFIRMED FIX: deviceManagement/configurationPolicies (the "Settings
-Catalog" collection Endpoint Security policies are built on) is a beta-only
-Graph resource — it has no v1.0 API reference page at all, only a beta one.
-Calling it under /v1.0 (this collector's original mistake) produces exactly
-the "Resource not found for the segment 'configurationPolicies'" 400 seen
-against a real tenant. Fixed by routing both the policy list call and the
-per-policy .../deviceStatuses call through a dedicated
-``self._beta_graph = graph.with_api_version("beta")`` client, the same
-escape hatch (and the same class of bug) already used by the Intune device
-collector for its own beta-only calls.
-
-HONEST CONFIDENCE NOTE on Endpoint Security policies (still open): the
-exact shape of per-device deployment status is not confirmed — this
-collector calls .../deviceStatuses (a per-device list, aggregated
-client-side into success/failed counts here), not .../deviceStatusOverview
-(the aggregate object the deviceConfigurations profiles above use), and
-Microsoft's own resource reference for deviceManagementConfigurationPolicy
-does not document deviceStatuses as a listed relationship at all — so this
-sub-call may still 404 even now that the base path is corrected. If it
-does, deviceStatusOverview is the fallback hypothesis to try next — the
-response body is logged either way so that's a real decision, not a guess,
-if it comes to that. templateReference.templateFamily (and, as a fallback,
-templateDisplayName) are used to identify which Endpoint Security category
-a policy belongs to; the exact enum member names for templateFamily are
-recalled with moderate confidence, same caveat class as every other new
-enum introduced this session.
+CONFIRMED FIX (verified against real Tenguard tenant 2026-08-17):
+  1. deviceManagement/configurationPolicies is a beta-only Graph resource.
+     Calling it under /v1.0 produces "Resource not found for the segment
+     'configurationPolicies'". Fixed by routing through
+     ``self._beta_graph = graph.with_api_version("beta")``.
+  2. Per-device deployment status (.../deviceStatuses) does NOT exist on
+     this resource — confirmed both via Microsoft's official API reference
+     (only two relationships: settings, assignments) and against a real
+     tenant ("Resource not found for the segment 'deviceStatuses'" on
+     every policy). The ``_fetch_endpoint_security_device_statuses`` method
+     has been removed entirely.
+  3. Instead, the policy's own ``isAssigned`` boolean (present on the list
+     response, no extra API call needed) is used as the status indicator:
+     assigned = Enabled, not assigned = Disabled, absent = Unknown.
+  4. templateReference.templateFamily correctly identifies Endpoint Security
+     categories (endpointSecurityAntivirus, endpointSecurityFirewall,
+     endpointSecurityEndpointDetectionAndResponse, etc.) — confirmed
+     working against a real tenant with 6 recognized policies and 2
+     non-Endpoint-Security ones correctly skipped (templateFamily=none).
 
 Honest scope, matching the pattern set by every other collector in this
 project: this reports whether a Conditional Access policy is actually
@@ -663,13 +656,20 @@ class CloudPolicyCollector(CollectorBase):
         field read via .get() so an absent/renamed field degrades to "not
         present" rather than crashing.
 
-        HONEST CONFIDENCE NOTE: this whole method is unverified against a
-        live tenant as of this writing. If deviceManagement/
-        configurationPolicies itself 404s or 400s, the response body is
-        logged below — check that before assuming the endpoint path is
-        wrong versus a permission gap (DeviceManagementConfiguration.Read.All
-        is already required elsewhere in this file and is expected, not
-        confirmed, to cover this collection too).
+        CONFIRMED against a real Tenguard tenant: the configurationPolicies
+        list call works under /beta (returns real policies with correct
+        templateReference data), and DeviceManagementConfiguration.Read.All
+        is sufficient permission. Per-device deployment status (the
+        .../deviceStatuses sub-resource this method originally tried) is
+        confirmed NOT to exist on this resource — Microsoft's own Graph
+        API reference lists only two relationships (settings, assignments),
+        and a real tenant confirms "Resource not found for the segment
+        'deviceStatuses'" on every policy. Since there is no documented
+        Graph API path to get per-device deployment status for
+        configurationPolicies, we use the policy's own isAssigned property
+        (a boolean already present on the list response) as the best
+        available indicator: assigned = actively targeting devices = Enabled;
+        not assigned = defined but not deployed = Disabled.
         """
         out: List[Policy] = []
         try:
@@ -688,45 +688,30 @@ class CloudPolicyCollector(CollectorBase):
 
                 if not policy_id:
                     continue
-                try:
-                    success, failed = self._fetch_endpoint_security_device_statuses(policy_id)
-                except Exception as e:
-                    detail = getattr(getattr(e, "response", None), "text", None)
-                    if detail:
-                        logger.warning(
-                            "  Could not fetch device statuses for endpoint security "
-                            "policy '%s': %s | Response: %s", name, e, detail[:500],
-                        )
-                    else:
-                        logger.warning(
-                            "  Could not fetch device statuses for endpoint security "
-                            "policy '%s': %s", name, e,
-                        )
-                    out.append(Policy(
-                        policy_name=name,
-                        policy_type="Intune Endpoint Security",
-                        status="Unknown",
-                        target="Devices",
-                        value=None,
-                        description=f"Endpoint Security policy ({template_label}) — "
-                                     f"deployment status could not be retrieved",
-                        last_applied=p.get("lastModifiedDateTime"),
-                    ))
-                    continue
 
-                # Same "zero applicable devices isn't a pass" distinction as
-                # the configuration-profile collector above.
-                if success == 0 and failed == 0:
-                    status = "Not Applicable"
+                # isAssigned is a boolean present on the list response (no
+                # extra API call needed). It tells us whether the policy has
+                # any active device/user group assignments — the closest
+                # thing to "deployment status" that this resource exposes,
+                # since per-device deviceStatuses is confirmed not to exist.
+                is_assigned = p.get("isAssigned")
+                if is_assigned is True:
+                    status = "Enabled"
+                    value = "Assigned to device/user groups"
+                elif is_assigned is False:
+                    status = "Disabled"
+                    value = "Not assigned — policy defined but not deployed"
                 else:
-                    status = "Enabled" if failed == 0 else "Disabled"
+                    status = "Unknown"
+                    value = "Assignment status not available"
+
                 out.append(Policy(
                     policy_name=name,
                     policy_type="Intune Endpoint Security",
                     status=status,
                     target="Devices",
-                    value=f"{success} succeeded / {failed} failed",
-                    description=f"Endpoint Security policy ({template_label}) deployment status",
+                    value=value,
+                    description=f"Endpoint Security policy ({template_label})",
                     last_applied=p.get("lastModifiedDateTime"),
                 ))
         except Exception as e:
@@ -739,43 +724,3 @@ class CloudPolicyCollector(CollectorBase):
             return out
         logger.info("  Intune endpoint security policies parsed: %d record(s)", len(out))
         return out
-
-    def _fetch_endpoint_security_device_statuses(self, policy_id: str) -> tuple:
-        """Return (success_count, failed_count) for one Endpoint Security
-        policy, aggregated client-side from its per-device status list.
-
-        Calls .../deviceStatuses (a list of individual per-device status
-        records), NOT .../deviceStatusOverview (the pre-aggregated object
-        the classic deviceConfigurations profiles expose) — configurationPolicies
-        is not confirmed to have a deviceStatusOverview sub-resource at all,
-        while deviceStatuses is the documented shape for Settings-Catalog-based
-        policies. If this 404s, deviceStatusOverview is the fallback
-        hypothesis to try next (see module docstring).
-
-        Per-record status values counted here (real Graph values, moderate
-        confidence): 'success' counts as success; 'error' and 'conflict'
-        count as failed (a conflicting policy assignment did not actually
-        apply, which is a real failure state, not a pass). Anything else
-        ('notApplicable', 'unknown', 'pending', or an unrecognized value) is
-        excluded from both counts entirely, matching this project's
-        never-guess-at-an-unconfirmed-label discipline elsewhere (see
-        ComplianceScorer._score_firewall's cloud_known dict) — logged once
-        if seen, rather than silently miscounted either way.
-        """
-        success = 0
-        failed = 0
-        unrecognized = set()
-        for record in self._beta_graph.get_all(f"deviceManagement/configurationPolicies/{policy_id}/deviceStatuses"):
-            status = record.get("status")
-            if status == "success":
-                success += 1
-            elif status in ("error", "conflict"):
-                failed += 1
-            elif status is not None:
-                unrecognized.add(status)
-        if unrecognized:
-            logger.warning(
-                "  Endpoint security policy %s: unrecognized device status value(s) %s "
-                "excluded from success/failed counts", policy_id, sorted(unrecognized),
-            )
-        return success, failed
