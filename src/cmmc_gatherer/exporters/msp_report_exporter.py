@@ -1823,20 +1823,23 @@ class MSPReportExporter(ExporterBase):
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Findings &amp; Recommendations — {customer_name}</title>
+    <title>Supplemental Findings &amp; Recommendations — {customer_name}</title>
     <style>{_BASE_CSS}</style>
 </head>
 <body>
     <div class="header">
-        <h1>Findings &amp; Recommendations</h1>
-        <div class="subtitle">{customer_name} — {assessment_id}</div>
+        <h1>Supplemental Findings &amp; Recommendations</h1>
+        <div class="subtitle">{customer_name} — {assessment_id} — For OSA Internal Use Only</div>
     </div>
     <div class="content">
-        <p style="margin-bottom:12px;color:#64748b;font-size:0.92em;">
-            <strong>Internal MSP use only.</strong> This page is intentionally not linked from the
-            main compliance report and is not intended for delivery to a client's assessor/auditor —
-            it is prioritized remediation guidance for the MSP, not assessment evidence.
-        </p>
+        <div style="margin-bottom:16px;padding:14px 18px;background:#fff8e1;border:1px solid #ffe082;border-left:4px solid #ffa000;font-size:0.92em;">
+            <strong>NOT PART OF THE CMMC ASSESSMENT.</strong> This document is a supplementary
+            resource provided separately from the assessment evidence report. It identifies
+            potential gaps observed during evidence collection and is intended for the
+            Organization Seeking Assessment (OSA) to use at their discretion for internal
+            remediation planning. This document should not be submitted as assessment evidence
+            or provided to the assessor/C3PAO.
+        </div>
         <p class="back-link"><a href="{back_href}">&larr; Back to main compliance report</a></p>
         <div class="section" id="sec-findings-recommendations">
             <h2>Findings &amp; Recommendations</h2>
