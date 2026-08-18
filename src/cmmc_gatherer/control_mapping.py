@@ -502,6 +502,18 @@ _POLICY_TYPE_TO_CONTROLS: Dict[str, List[tuple]] = {
     "Intune Update Ring": [("SI.L1-3.14.1", Confidence.DIRECT)],
     "Intune App Protection Policy": [("AC.L1-3.1.1", Confidence.SUPPORTING)],
     "Time Synchronization": [("AU.L2-3.3.7", Confidence.DIRECT)],
+    # Endpoint Security policies (Settings Catalog / beta API) — the
+    # policy_type is the generic "Intune Endpoint Security" and the
+    # description field carries the specific category (EDR, Antivirus,
+    # Firewall, etc.). The generic type gets a broad supporting mapping;
+    # category-specific mappings would need a by-description lookup that
+    # doesn't exist in controls_for_policy() yet, so this is the honest
+    # best-available mapping without overcomplicating the lookup path.
+    "Intune Endpoint Security": [
+        ("CM.L2-3.4.2", Confidence.SUPPORTING),   # security baseline configuration
+        ("SI.L1-3.14.2", Confidence.SUPPORTING),   # AV/EDR policy enforcement
+        ("SC.L1-3.13.1", Confidence.SUPPORTING),   # firewall policy enforcement
+    ],
 }
 
 

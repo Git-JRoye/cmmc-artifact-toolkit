@@ -127,6 +127,8 @@ _BASE_CSS = """
         .header .subtitle { font-size: 1em; color: #94a3b8; margin-top: 6px;
                              text-transform: uppercase; letter-spacing: 1.5px; }
         .content { max-width: 920px; margin: 0 auto; padding: 40px 30px; }
+        .section-wide { max-width: 100%; margin-left: -30px; margin-right: -30px;
+                        padding-left: 30px; padding-right: 30px; }
         .section { margin: 34px 0; page-break-inside: avoid; }
         .section h2 { font-family: Georgia, 'Times New Roman', serif; font-weight: normal;
                        font-size: 1.3em; color: #1e293b; border-bottom: 1px solid #cbd5e1;
@@ -212,6 +214,7 @@ _BASE_CSS = """
         @page { size: landscape; margin: 0.4in; }
         @media print {
             .content { max-width: 100%; padding: 6px 10px; }
+            .section-wide { margin-left: 0; margin-right: 0; padding-left: 0; padding-right: 0; }
             table { font-size: 0.68em; table-layout: auto; }
             th, td { padding: 4px 5px; }
             /* Only data cells get word-break — header labels are short,
@@ -500,7 +503,7 @@ class MSPReportExporter(ExporterBase):
 """
 
         if onprem_eps:
-            html += f"""        <div class="section" id="sec-onprem-endpoints">
+            html += f"""        <div class="section section-wide" id="sec-onprem-endpoints">
             <h2>On-Prem Endpoint Status</h2>
             {self._satisfies_badge_html(['firewall_status', 'antivirus_status', 'patch_level'], present_evidence)}
             <table>
@@ -543,7 +546,7 @@ class MSPReportExporter(ExporterBase):
             html += "            </table>\n        </div>\n"
 
         if cloud_eps:
-            html += f"""        <div class="section" id="sec-cloud-devices">
+            html += f"""        <div class="section section-wide" id="sec-cloud-devices">
             <h2>Cloud-Managed Devices (Intune)</h2>
             {self._satisfies_badge_html(['bitlocker_key_escrow', 'cloud_realtime_malware_protection', 'cloud_firewall_status'], present_evidence)}
             <table>
@@ -621,7 +624,7 @@ class MSPReportExporter(ExporterBase):
 
         ad_users = self._ad_users(artifacts)
         if ad_users:
-            html += f"""        <div class="section" id="sec-ad-users">
+            html += f"""        <div class="section section-wide" id="sec-ad-users">
             <h2>Active Directory / Identity Objects — Users</h2>
             {self._satisfies_badge_html(['mfa_registration', 'account_identification', 'privileged_role_tracking', 'auth_method_detail'], present_evidence)}
             <p style="font-size:0.88em;color:#64748b;">
@@ -695,7 +698,7 @@ class MSPReportExporter(ExporterBase):
                 elif auth_lookup_failed:
                     auth_cell = '<span class="status-warn">Lookup failed</span>'
                 elif auth_details:
-                    auth_cell = ', '.join(auth_details)
+                    auth_cell = ', '.join(dict.fromkeys(auth_details))
                 else:
                     auth_cell = '<span class="na">None registered</span>'
 
@@ -742,7 +745,7 @@ class MSPReportExporter(ExporterBase):
             high_priv_sps = [sp for sp in service_principals if (sp.attributes or {}).get('high_privilege_permissions')]
             apps_link_href = apps_href or "enterprise_apps.html"
             high_priv_rows_html = "".join(self._service_principal_row_html(sp) for sp in high_priv_sps)
-            html += f"""        <div class="section" id="sec-enterprise-apps">
+            html += f"""        <div class="section section-wide" id="sec-enterprise-apps">
             <h2>Enterprise Applications</h2>
             {self._satisfies_badge_html(['enterprise_app_inventory', 'high_privilege_app_permission'], present_evidence)}
             <p style="font-size:0.92em;color:#475569;">
@@ -1820,14 +1823,10 @@ class MSPReportExporter(ExporterBase):
 </html>"""
 
     def _generate_security_events_html(self, artifacts: Any, present_evidence: List[str]) -> str:
-        """Security events were being collected and scored but never
-        actually shown anywhere in the report — same blind spot the AD
-        tables had before. Can't dump potentially thousands of raw events
-        into one HTML file, so this shows EVERY Critical/Error event (the
-        actual audit-relevant ones) up to a sane cap, plus a small sample of
-        Information-level events for context — with an explicit disclosure
-        of exactly how much is shown out of the real total, so this never
-        reads as a complete dump when it isn't.
+        """Security events section showing a summary by level/source plus
+        a small evidence sample from each severity group (Critical/Error,
+        Warning, Alert, Information) — capped at 5 per group so the report
+        stays concise while still proving that every tier was collected.
         """
         if 'audit_log_collection' not in present_evidence:
             return ""
@@ -1836,13 +1835,24 @@ class MSPReportExporter(ExporterBase):
         if not events:
             return ""
 
-        MAX_SEVERE_ROWS = 200
-        SAMPLE_INFO_ROWS = 10
+        SAMPLE_PER_GROUP = 5
 
-        severe = [e for e in events if e.level in ('Critical', 'Error')]
-        informational = [e for e in events if e.level not in ('Critical', 'Error')]
-        shown_severe = severe[:MAX_SEVERE_ROWS]
-        shown_info = informational[:SAMPLE_INFO_ROWS]
+        # Bucket events by severity group
+        severity_groups = {
+            'Critical / Error': [],
+            'Warning': [],
+            'Alert': [],
+            'Information': [],
+        }
+        for e in events:
+            if e.level in ('Critical', 'Error'):
+                severity_groups['Critical / Error'].append(e)
+            elif e.level == 'Warning':
+                severity_groups['Warning'].append(e)
+            elif e.level == 'Alert':
+                severity_groups['Alert'].append(e)
+            else:
+                severity_groups['Information'].append(e)
 
         by_level: Dict[str, int] = {}
         by_source: Dict[str, int] = {}
@@ -1851,16 +1861,16 @@ class MSPReportExporter(ExporterBase):
             by_source[e.source] = by_source.get(e.source, 0) + 1
 
         summary_rows = "".join(
-            f"                <tr><td>{level}</td><td>{count}</td></tr>\n"
+            f"                    <tr><td>{level}</td><td style=\"text-align:right\">{count}</td></tr>\n"
             for level, count in sorted(by_level.items(), key=lambda kv: -kv[1])
         )
         source_rows = "".join(
-            f"                <tr><td>{source}</td><td>{count}</td></tr>\n"
+            f"                    <tr><td>{source}</td><td style=\"text-align:right\">{count}</td></tr>\n"
             for source, count in sorted(by_source.items(), key=lambda kv: -kv[1])
         )
 
         def event_row(e) -> str:
-            level_color = {'Critical': 'status-bad', 'Error': 'status-bad', 'Warning': 'status-warn'}.get(e.level, 'status-neutral')
+            level_color = {'Critical': 'status-bad', 'Error': 'status-bad', 'Warning': 'status-warn', 'Alert': 'status-warn'}.get(e.level, 'status-neutral')
             msg = (e.message or '').replace('\r\n', ' ').replace('\n', ' ')
             if len(msg) > 150:
                 msg = msg[:150] + "…"
@@ -1870,41 +1880,42 @@ class MSPReportExporter(ExporterBase):
                 f"<td>{e.user or '<span class=\"na\">N/A</span>'}</td><td>{msg}</td></tr>\n"
             )
 
-        disclosure_bits = []
-        if len(severe) > MAX_SEVERE_ROWS:
-            disclosure_bits.append(f"{MAX_SEVERE_ROWS} of {len(severe)} Critical/Error events shown")
-        else:
-            disclosure_bits.append(f"all {len(severe)} Critical/Error event(s) shown")
-        disclosure_bits.append(f"{len(shown_info)} of {len(informational)} Information-level event(s) shown as a sample")
+        # Build disclosure text
+        disclosure_parts = []
+        for group_name, group_events in severity_groups.items():
+            if not group_events:
+                continue
+            shown = min(len(group_events), SAMPLE_PER_GROUP)
+            disclosure_parts.append(f"{shown} of {len(group_events)} {group_name}")
+        disclosure = "; ".join(disclosure_parts) + " event(s) shown as evidence samples"
 
         badge = self._satisfies_badge_html(['audit_log_collection', 'audit_user_traceability', 'security_alerts', 'device_sanitization_events'], present_evidence)
         html = f"""        <div class="section" id="sec-security-events">
             <h2>Security Events</h2>
             {badge}
-            <p>{len(events)} total event(s) collected. {'; '.join(disclosure_bits)}.</p>
-            <table>
-                <tr><th>Level</th><th>Count</th></tr>
+            <p>{len(events)} total event(s) collected. {disclosure}.</p>
+            <div style="display:flex;gap:24px;flex-wrap:wrap;">
+                <table style="flex:1;min-width:200px;">
+                    <tr><th style="width:70%">Level</th><th style="width:30%;text-align:right">Count</th></tr>
 {summary_rows}
-            </table>
-            <table>
-                <tr><th>Source</th><th>Count</th></tr>
+                </table>
+                <table style="flex:1;min-width:200px;">
+                    <tr><th style="width:70%">Source</th><th style="width:30%;text-align:right">Count</th></tr>
 {source_rows}
-            </table>
+                </table>
+            </div>
 """
-        if shown_severe:
-            html += """            <h3>Critical / Error Events</h3>
+        # Render a sample table for each severity group that has events
+        for group_name, group_events in severity_groups.items():
+            if not group_events:
+                continue
+            shown = group_events[:SAMPLE_PER_GROUP]
+            count_note = f" ({len(shown)} of {len(group_events)})" if len(group_events) > SAMPLE_PER_GROUP else f" ({len(group_events)})"
+            html += f"""            <h3>{group_name} Events{count_note}</h3>
             <table>
                 <tr><th>Timestamp</th><th>Source</th><th>Level</th><th>User</th><th>Message</th></tr>
 """
-            html += "".join(event_row(e) for e in shown_severe)
-            html += "            </table>\n"
-
-        if shown_info:
-            html += """            <h3>Sample Information-Level Events</h3>
-            <table>
-                <tr><th>Timestamp</th><th>Source</th><th>Level</th><th>User</th><th>Message</th></tr>
-"""
-            html += "".join(event_row(e) for e in shown_info)
+            html += "".join(event_row(e) for e in shown)
             html += "            </table>\n"
 
         html += "        </div>\n"
