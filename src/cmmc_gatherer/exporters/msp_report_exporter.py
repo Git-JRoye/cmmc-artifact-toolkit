@@ -127,8 +127,10 @@ _BASE_CSS = """
         .header .subtitle { font-size: 1em; color: #94a3b8; margin-top: 6px;
                              text-transform: uppercase; letter-spacing: 1.5px; }
         .content { max-width: 920px; margin: 0 auto; padding: 40px 30px; }
-        .section-wide { max-width: 100%; margin-left: -30px; margin-right: -30px;
-                        padding-left: 30px; padding-right: 30px; }
+        .section-wide { width: 100vw; position: relative;
+                        left: 50%; margin-left: -50vw;
+                        padding-left: 30px; padding-right: 30px;
+                        box-sizing: border-box; }
         .section { margin: 34px 0; page-break-inside: avoid; }
         .section h2 { font-family: Georgia, 'Times New Roman', serif; font-weight: normal;
                        font-size: 1.3em; color: #1e293b; border-bottom: 1px solid #cbd5e1;
@@ -214,7 +216,8 @@ _BASE_CSS = """
         @page { size: landscape; margin: 0.4in; }
         @media print {
             .content { max-width: 100%; padding: 6px 10px; }
-            .section-wide { margin-left: 0; margin-right: 0; padding-left: 0; padding-right: 0; }
+            .section-wide { width: auto; position: static; left: auto;
+                            margin-left: 0; padding-left: 0; padding-right: 0; }
             table { font-size: 0.68em; table-layout: auto; }
             th, td { padding: 4px 5px; }
             /* Only data cells get word-break — header labels are short,
