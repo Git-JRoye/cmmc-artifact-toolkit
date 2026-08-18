@@ -135,23 +135,35 @@ class CloudPolicyCollector(CollectorBase):
         self._beta_graph = graph.with_api_version("beta")
 
     def collect(self) -> List[Policy]:
+        # Every sub-collection below can involve an unbounded number of
+        # sequential Graph calls (one per policy for per-device deployment
+        # status), and each only logs a summary line once it FINISHES — so a
+        # slow or large tenant previously looked identical to a genuine hang,
+        # with no way to tell which of the five sub-collections was actually
+        # running. A "Collecting X..." line before each one fixes that: the
+        # last printed line always tells you where execution currently is.
         policies: List[Policy] = []
+        logger.info("  Collecting Conditional Access policies...")
         try:
             policies += self._collect_conditional_access()
         except Exception as e:
             logger.error("Conditional Access policy collection failed: %s", e)
+        logger.info("  Collecting Intune configuration profiles...")
         try:
             policies += self._collect_intune_config_profiles()
         except Exception as e:
             logger.error("Intune configuration profile collection failed: %s", e)
+        logger.info("  Collecting Intune compliance policies...")
         try:
             policies += self._collect_compliance_policies()
         except Exception as e:
             logger.error("Intune compliance policy collection failed: %s", e)
+        logger.info("  Collecting Intune app protection policies...")
         try:
             policies += self._collect_app_protection_policies()
         except Exception as e:
             logger.error("Intune app protection policy collection failed: %s", e)
+        logger.info("  Collecting Intune Endpoint Security policies...")
         try:
             policies += self._collect_endpoint_security_policies()
         except Exception as e:
