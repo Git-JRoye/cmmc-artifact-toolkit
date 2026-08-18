@@ -675,7 +675,8 @@ class CloudPolicyCollector(CollectorBase):
         try:
             for p in self._beta_graph.get_all("deviceManagement/configurationPolicies"):
                 policy_id = p.get("id")
-                name = p.get("displayName") or policy_id or "Unnamed Endpoint Security Policy"
+                # Beta API uses "name" (not "displayName") for this resource.
+                name = p.get("name") or p.get("displayName") or policy_id or "Unnamed Endpoint Security Policy"
                 template_label = self._endpoint_security_template_label(p)
                 if template_label is None:
                     logger.info(
@@ -689,12 +690,20 @@ class CloudPolicyCollector(CollectorBase):
                 if not policy_id:
                     continue
 
-                # isAssigned is a boolean present on the list response (no
-                # extra API call needed). It tells us whether the policy has
-                # any active device/user group assignments — the closest
-                # thing to "deployment status" that this resource exposes,
-                # since per-device deviceStatuses is confirmed not to exist.
+                # isAssigned is documented as a property of this resource but
+                # may not be returned in the list response for all tenants.
+                # If it's absent, fall back to fetching the assignments
+                # relationship directly — an empty list means "not deployed".
                 is_assigned = p.get("isAssigned")
+                if is_assigned is None:
+                    try:
+                        assignments = list(self._beta_graph.get_all(
+                            f"deviceManagement/configurationPolicies/{policy_id}/assignments"
+                        ))
+                        is_assigned = len(assignments) > 0
+                    except Exception:
+                        pass  # leave as None → "Unknown"
+
                 if is_assigned is True:
                     status = "Enabled"
                     value = "Assigned to device/user groups"
