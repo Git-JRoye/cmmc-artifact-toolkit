@@ -29,6 +29,7 @@ from .collectors.cloud.cloud_event_collector import CloudSecurityEventCollector
 from .collectors.cloud.cloud_policy_collector import CloudPolicyCollector
 from .collectors.cloud.defender_device_collector import DefenderDeviceCollector
 from .collectors.cloud.entra_identity_collector import EntraIdentityCollector
+from .collectors.cloud.mde_alert_collector import MdeAlertCollector
 from .collectors.cloud.service_principal_collector import ServicePrincipalCollector
 from .collectors.cloud.intune_rbac_collector import IntuneRbacCollector
 from .collectors.cloud.intune_device_collector import IntuneDeviceCollector
@@ -375,6 +376,19 @@ class TenantOrchestrator:
         else:
             self._apply_mde_atp_data(endpoints, {}, lookup_failed=True)
 
+        # -- MDE Alerts & Incidents --
+        # Isolated from device collection: uses the same mde_client but a
+        # different API endpoint (/api/alerts + /api/incidents vs. /api/machines).
+        # Failure here never affects device health data or any other collector.
+        # Requires WindowsDefenderATP -> Alert.Read.All + Incident.Read.All.
+        events_mde_alerts: List = []
+        if mde_client is not None:
+            try:
+                events_mde_alerts = MdeAlertCollector(mde_client).collect()
+            except Exception as e:
+                logger.error("[%s] MDE alert/incident collector failed: %s", profile.tenant_key, e)
+                errors.append(f"mde_alerts: {e}")
+
         ad_objects: List = []
         try:
             ad_objects = EntraIdentityCollector(graph).collect()
@@ -407,6 +421,11 @@ class TenantOrchestrator:
         except Exception as e:
             logger.error("[%s] Cloud policy collector failed: %s", profile.tenant_key, e)
             errors.append(f"cloud_policies: {e}")
+
+        # Merge MDE alerts/incidents into the main events list — they flow
+        # into the same ArtifactCollection.security_events but are displayed
+        # in their own dedicated report section (distinguished by source).
+        events += events_mde_alerts
 
         return endpoints, ad_objects, events, policies, errors
 

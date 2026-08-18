@@ -110,7 +110,12 @@ logger = logging.getLogger(__name__)
 # (or vice versa) in either place.
 _CLOUD_POLICY_TYPES = ('Conditional Access', 'Intune Configuration Profile')
 _CLOUD_EVENT_SOURCES = ('Entra Sign-In Logs', 'Entra Directory Audit Logs', 'Microsoft Graph Security Alerts',
-                        'Intune Device Sanitization Events')
+                        'Intune Device Sanitization Events', 'Microsoft Defender for Endpoint Alerts',
+                        'MDE Incidents')
+
+# MDE sources that get their own dedicated report section — excluded from
+# the generic Security Events section to avoid double-display.
+_MDE_EVENT_SOURCES = ('Microsoft Defender for Endpoint Alerts', 'MDE Incidents')
 
 # Shared stylesheet for both the main report and the standalone software
 # inventory page, so a visual change (or the "make it look more
@@ -810,6 +815,7 @@ class MSPReportExporter(ExporterBase):
 """
 
         html += self._generate_software_summary_link_html(artifacts, present_evidence, software_href)
+        html += self._generate_mde_alerts_html(artifacts, present_evidence)
         html += self._generate_security_events_html(artifacts, present_evidence)
 
         scope_items = []
@@ -817,8 +823,10 @@ class MSPReportExporter(ExporterBase):
             scope_items.append("Windows endpoint security configurations")
         if any(e.source not in _CLOUD_EVENT_SOURCES for e in artifacts.security_events):
             scope_items.append("Windows security event logging and monitoring")
-        if any(e.source in _CLOUD_EVENT_SOURCES for e in artifacts.security_events):
+        if any(e.source in _CLOUD_EVENT_SOURCES and e.source not in _MDE_EVENT_SOURCES for e in artifacts.security_events):
             scope_items.append("Entra sign-in and directory audit log review")
+        if any(e.source in _MDE_EVENT_SOURCES for e in artifacts.security_events):
+            scope_items.append("Microsoft Defender for Endpoint alert and incident lifecycle review")
         if any(p.policy_type == 'Local Security Policy' for p in artifacts.policies):
             scope_items.append("Local security and account lockout policy")
         if any(p.policy_type == 'Group Policy' for p in artifacts.policies):
@@ -893,6 +901,11 @@ class MSPReportExporter(ExporterBase):
         'high_privilege_app_permission': 'sec-enterprise-apps',
         'security_alerts': 'sec-security-events',
         'device_sanitization_events': 'sec-security-events',
+        'mde_alerts_lifecycle': 'sec-mde-alerts',
+        'mde_attack_detection': 'sec-mde-alerts',
+        'mde_unauthorized_use_detection': 'sec-mde-alerts',
+        'mde_incident_handling': 'sec-mde-alerts',
+        'mde_incident_reporting': 'sec-mde-alerts',
         'auth_method_detail': 'sec-ad-users',
         'intune_rbac_assignment': 'sec-intune-rbac',
         'app_protection_policy': 'sec-policy-compliance',
@@ -1003,6 +1016,19 @@ class MSPReportExporter(ExporterBase):
 
         if any(p.policy_type == 'Intune App Protection Policy' for p in artifacts.policies):
             present.append('app_protection_policy')
+
+        # MDE Alerts & Incidents — dedicated evidence keys for the alert
+        # lifecycle and incident handling sections. Distinguished by source
+        # name so they don't false-trigger from Graph Security Alerts.
+        has_mde_alerts = any(e.source == 'Microsoft Defender for Endpoint Alerts' for e in artifacts.security_events)
+        has_mde_incidents = any(e.source == 'MDE Incidents' for e in artifacts.security_events)
+        if has_mde_alerts or has_mde_incidents:
+            present.append('mde_alerts_lifecycle')
+            present.append('mde_attack_detection')
+            present.append('mde_unauthorized_use_detection')
+            present.append('mde_incident_handling')
+        if has_mde_incidents:
+            present.append('mde_incident_reporting')
 
         return present
 
@@ -1821,6 +1847,252 @@ class MSPReportExporter(ExporterBase):
 </body>
 </html>"""
 
+    def _generate_mde_alerts_html(self, artifacts: Any, present_evidence: List[str]) -> str:
+        """Dedicated MDE Alerts & Incidents section — separated from the
+        generic Security Events section because MDE provides structured
+        investigation lifecycle data (alert status, investigation state,
+        classification, determination, detection source) that deserves
+        its own display matching the Defender portal's Alerts and
+        Incidents views.
+
+        Shows:
+          1. Alert summary by severity and category
+          2. Alert detail table: name, severity, status, investigation
+             state, category, detection source, device, timeline
+          3. Incident summary by severity and status
+          4. Incident detail table: name, severity, status, categories,
+             alert count, detection sources, timeline
+        """
+        mde_alerts = [e for e in artifacts.security_events
+                      if e.source == 'Microsoft Defender for Endpoint Alerts']
+        mde_incidents = [e for e in artifacts.security_events
+                         if e.source == 'MDE Incidents']
+
+        if not mde_alerts and not mde_incidents:
+            return ""
+
+        badge = self._satisfies_badge_html(
+            ['mde_alerts_lifecycle', 'mde_attack_detection', 'mde_unauthorized_use_detection',
+             'mde_incident_handling', 'mde_incident_reporting'],
+            present_evidence,
+        )
+
+        html = f"""        <div class="section" id="sec-mde-alerts">
+            <h2>MDE Alerts &amp; Incidents</h2>
+            {badge}
+            <p>Microsoft Defender for Endpoint alert and incident data showing
+            detection, investigation, and resolution lifecycle — evidence for
+            SI.L2-3.14.3 (Security Alerts &amp; Advisories), IR.L2-3.6.1
+            (Incident Handling), and IR.L2-3.6.2 (Incident Reporting).</p>
+"""
+
+        # ── Alerts Section ────────────────────────────────────────────────
+        if mde_alerts:
+            # Summary tables: by severity and by category
+            by_severity: Dict[str, int] = {}
+            by_category: Dict[str, int] = {}
+            by_status: Dict[str, int] = {}
+            by_detection: Dict[str, int] = {}
+            for e in mde_alerts:
+                sev = (e.event_data or {}).get('severity', 'Unknown')
+                cat = (e.event_data or {}).get('category', 'Unknown')
+                st = (e.event_data or {}).get('status', 'Unknown')
+                det = (e.event_data or {}).get('detection_source', 'Unknown')
+                by_severity[sev] = by_severity.get(sev, 0) + 1
+                by_category[cat] = by_category.get(cat, 0) + 1
+                by_status[st] = by_status.get(st, 0) + 1
+                by_detection[det] = by_detection.get(det, 0) + 1
+
+            sev_order = ['High', 'Medium', 'Low', 'Informational']
+            sev_rows = ""
+            for sev in sev_order:
+                if sev in by_severity:
+                    color = {'High': 'status-bad', 'Medium': 'status-warn', 'Low': 'status-neutral', 'Informational': 'status-neutral'}.get(sev, '')
+                    sev_rows += f'                    <tr><td><span class="{color}">{sev}</span></td><td style="text-align:right">{by_severity[sev]}</td></tr>\n'
+            for sev, count in sorted(by_severity.items(), key=lambda kv: -kv[1]):
+                if sev not in sev_order:
+                    sev_rows += f'                    <tr><td>{sev}</td><td style="text-align:right">{count}</td></tr>\n'
+
+            cat_rows = "".join(
+                f'                    <tr><td>{cat}</td><td style="text-align:right">{count}</td></tr>\n'
+                for cat, count in sorted(by_category.items(), key=lambda kv: -kv[1])
+            )
+            status_rows = "".join(
+                f'                    <tr><td>{st}</td><td style="text-align:right">{count}</td></tr>\n'
+                for st, count in sorted(by_status.items(), key=lambda kv: -kv[1])
+            )
+            detection_rows = "".join(
+                f'                    <tr><td>{det}</td><td style="text-align:right">{count}</td></tr>\n'
+                for det, count in sorted(by_detection.items(), key=lambda kv: -kv[1])
+            )
+
+            html += f"""            <h3>Alerts ({len(mde_alerts)})</h3>
+            <div style="display:flex;gap:24px;flex-wrap:wrap;">
+                <table style="flex:1;min-width:180px;">
+                    <tr><th style="width:70%">Severity</th><th style="width:30%;text-align:right">Count</th></tr>
+{sev_rows}
+                </table>
+                <table style="flex:1;min-width:180px;">
+                    <tr><th style="width:70%">Category</th><th style="width:30%;text-align:right">Count</th></tr>
+{cat_rows}
+                </table>
+                <table style="flex:1;min-width:180px;">
+                    <tr><th style="width:70%">Status</th><th style="width:30%;text-align:right">Count</th></tr>
+{status_rows}
+                </table>
+                <table style="flex:1;min-width:180px;">
+                    <tr><th style="width:70%">Detection Source</th><th style="width:30%;text-align:right">Count</th></tr>
+{detection_rows}
+                </table>
+            </div>
+"""
+
+            # Alert detail table — show all (capped at 50 for report size)
+            MAX_ALERT_ROWS = 50
+            shown_alerts = mde_alerts[:MAX_ALERT_ROWS]
+            overflow_note = f" (showing {MAX_ALERT_ROWS} of {len(mde_alerts)})" if len(mde_alerts) > MAX_ALERT_ROWS else ""
+
+            html += f"""            <h4>Alert Detail{overflow_note}</h4>
+            <table>
+                <tr>
+                    <th>Alert Name</th><th>Severity</th><th>Status</th>
+                    <th>Investigation</th><th>Category</th><th>Detection Source</th>
+                    <th>Device</th><th>First Activity</th><th>Last Activity</th>
+                </tr>
+"""
+            for e in shown_alerts:
+                d = e.event_data or {}
+                sev = d.get('severity', 'Unknown')
+                sev_color = {'High': 'status-bad', 'Medium': 'status-warn', 'Low': 'status-neutral', 'Informational': 'status-neutral'}.get(sev, '')
+                st = d.get('status', '')
+                st_color = 'status-good' if st == 'Resolved' else ('status-warn' if st in ('InProgress', 'New') else '')
+                inv = d.get('investigation_state', '')
+                inv_display = inv or '<span class="na">N/A</span>'
+                title = d.get('title', 'Unknown')
+                if len(title) > 80:
+                    title = title[:80] + "…"
+                first_time = (d.get('first_event_time') or '')[:19].replace('T', ' ')
+                last_time = (d.get('last_event_time') or '')[:19].replace('T', ' ')
+
+                # Show classification/determination inline if available
+                class_info = ""
+                if d.get('classification'):
+                    class_info = f" ({d['classification']}"
+                    if d.get('determination'):
+                        class_info += f" — {d['determination']}"
+                    class_info += ")"
+
+                html += (
+                    f'                <tr>'
+                    f'<td>{title}{class_info}</td>'
+                    f'<td><span class="{sev_color}">{sev}</span></td>'
+                    f'<td><span class="{st_color}">{st}</span></td>'
+                    f'<td>{inv_display}</td>'
+                    f'<td>{d.get("category", "")}</td>'
+                    f'<td>{d.get("detection_source", "")}</td>'
+                    f'<td>{d.get("computer_dns_name", "N/A")}</td>'
+                    f'<td>{first_time}</td>'
+                    f'<td>{last_time}</td>'
+                    f'</tr>\n'
+                )
+
+            html += "            </table>\n"
+
+        # ── Incidents Section ─────────────────────────────────────────────
+        if mde_incidents:
+            inc_by_severity: Dict[str, int] = {}
+            inc_by_status: Dict[str, int] = {}
+            for e in mde_incidents:
+                sev = (e.event_data or {}).get('severity', 'Unknown')
+                st = (e.event_data or {}).get('status', 'Unknown')
+                inc_by_severity[sev] = inc_by_severity.get(sev, 0) + 1
+                inc_by_status[st] = inc_by_status.get(st, 0) + 1
+
+            inc_sev_rows = ""
+            for sev in ['High', 'Medium', 'Low', 'Informational']:
+                if sev in inc_by_severity:
+                    color = {'High': 'status-bad', 'Medium': 'status-warn', 'Low': 'status-neutral', 'Informational': 'status-neutral'}.get(sev, '')
+                    inc_sev_rows += f'                    <tr><td><span class="{color}">{sev}</span></td><td style="text-align:right">{inc_by_severity[sev]}</td></tr>\n'
+
+            inc_status_rows = "".join(
+                f'                    <tr><td>{st}</td><td style="text-align:right">{count}</td></tr>\n'
+                for st, count in sorted(inc_by_status.items(), key=lambda kv: -kv[1])
+            )
+
+            html += f"""            <h3>Incidents ({len(mde_incidents)})</h3>
+            <div style="display:flex;gap:24px;flex-wrap:wrap;">
+                <table style="flex:1;min-width:200px;">
+                    <tr><th style="width:70%">Severity</th><th style="width:30%;text-align:right">Count</th></tr>
+{inc_sev_rows}
+                </table>
+                <table style="flex:1;min-width:200px;">
+                    <tr><th style="width:70%">Status</th><th style="width:30%;text-align:right">Count</th></tr>
+{inc_status_rows}
+                </table>
+            </div>
+"""
+
+            MAX_INCIDENT_ROWS = 50
+            shown_incidents = mde_incidents[:MAX_INCIDENT_ROWS]
+            overflow_note = f" (showing {MAX_INCIDENT_ROWS} of {len(mde_incidents)})" if len(mde_incidents) > MAX_INCIDENT_ROWS else ""
+
+            html += f"""            <h4>Incident Detail{overflow_note}</h4>
+            <table>
+                <tr>
+                    <th>Incident Name</th><th>Severity</th><th>Status</th>
+                    <th>Categories</th><th>Alerts</th><th>Detection Sources</th>
+                    <th>Impacted Devices</th><th>Created</th><th>Last Updated</th>
+                </tr>
+"""
+            for e in shown_incidents:
+                d = e.event_data or {}
+                sev = d.get('severity', 'Unknown')
+                sev_color = {'High': 'status-bad', 'Medium': 'status-warn', 'Low': 'status-neutral', 'Informational': 'status-neutral'}.get(sev, '')
+                st = d.get('status', '')
+                st_color = 'status-good' if st == 'Resolved' else ('status-warn' if st == 'Active' else '')
+
+                inc_name = d.get('incident_name', 'Unknown')
+                if len(inc_name) > 80:
+                    inc_name = inc_name[:80] + "…"
+
+                categories = ", ".join(d.get('categories', [])) or '<span class="na">N/A</span>'
+                det_sources = ", ".join(d.get('detection_sources', [])) or '<span class="na">N/A</span>'
+                devices = ", ".join(d.get('impacted_devices', [])) or '<span class="na">N/A</span>'
+
+                alert_count = d.get('alert_count', 0)
+                active_count = d.get('active_alert_count', 0)
+                alert_display = f"{active_count} active / {alert_count} total"
+
+                # Show classification/determination if available
+                class_info = ""
+                if d.get('classification'):
+                    class_info = f" ({d['classification']}"
+                    if d.get('determination'):
+                        class_info += f" — {d['determination']}"
+                    class_info += ")"
+
+                created = (d.get('created_time') or '')[:19].replace('T', ' ')
+                updated = (d.get('last_update_time') or '')[:19].replace('T', ' ')
+
+                html += (
+                    f'                <tr>'
+                    f'<td>{inc_name}{class_info}</td>'
+                    f'<td><span class="{sev_color}">{sev}</span></td>'
+                    f'<td><span class="{st_color}">{st}</span></td>'
+                    f'<td>{categories}</td>'
+                    f'<td>{alert_display}</td>'
+                    f'<td>{det_sources}</td>'
+                    f'<td>{devices}</td>'
+                    f'<td>{created}</td>'
+                    f'<td>{updated}</td>'
+                    f'</tr>\n'
+                )
+
+            html += "            </table>\n"
+
+        html += "        </div>\n"
+        return html
+
     def _generate_security_events_html(self, artifacts: Any, present_evidence: List[str]) -> str:
         """Security events section showing a summary by level/source plus
         a small evidence sample from each severity group (Critical/Error,
@@ -1830,7 +2102,9 @@ class MSPReportExporter(ExporterBase):
         if 'audit_log_collection' not in present_evidence:
             return ""
 
-        events = artifacts.security_events
+        # Exclude MDE alerts/incidents — they have their own dedicated
+        # section (sec-mde-alerts) with richer, structured display.
+        events = [e for e in artifacts.security_events if e.source not in _MDE_EVENT_SOURCES]
         if not events:
             return ""
 

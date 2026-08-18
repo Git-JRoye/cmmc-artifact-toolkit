@@ -27,6 +27,25 @@ import logging
 import os
 import sys
 
+# Auto-load .env file if present (no extra dependency needed).
+# This lets you store MSP_SHARED_APP_SECRET in a .env file in the
+# project root instead of setting it manually each PowerShell session.
+# .env is already in .gitignore so it won't be committed.
+_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if os.path.isfile(_env_path):
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if not _line or _line.startswith("#"):
+                continue
+            key, _, val = _line.partition("=")
+            key, val = key.strip(), val.strip()
+            # Strip surrounding quotes if present
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+                val = val[1:-1]
+            if key and val:
+                os.environ.setdefault(key, val)
+
 sys.path.insert(0, "src")
 
 logging.basicConfig(

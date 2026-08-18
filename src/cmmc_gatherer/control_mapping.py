@@ -246,6 +246,11 @@ PRACTICES: Dict[str, Practice] = {
         "systems that includes preparation, detection, analysis, containment, "
         "recovery, and user response activities.",
     ),
+    "IR.L2-3.6.2": Practice(
+        "IR.L2-3.6.2", "IR", 2, "Incident Reporting",
+        "Track, document, and report incidents to designated officials and/or "
+        "authorities both internal and external to the organization.",
+    ),
     "CA.L2-3.12.1": Practice(
         "CA.L2-3.12.1", "CA", 2, "Security Control Assessment",
         "Periodically assess the security controls in organizational systems "
@@ -394,8 +399,13 @@ EVIDENCE_MAP: List[EvidenceMapping] = [
     ),
     EvidenceMapping(
         "mde_incident_handling",
-        "MDE alert triage, assignment, and investigation as incident handling evidence",
-        ["IR.L2-3.6.1"], Confidence.SUPPORTING,
+        "MDE incident lifecycle (Active → Resolved) with classification and determination as incident handling evidence",
+        ["IR.L2-3.6.1"], Confidence.DIRECT,
+    ),
+    EvidenceMapping(
+        "mde_incident_reporting",
+        "MDE incident records with timestamps, severity, categories, and correlated alert chains as incident reporting evidence",
+        ["IR.L2-3.6.2"], Confidence.SUPPORTING,
     ),
 
     # ── MDE Vulnerability Collector ──────────────────────────────────────
