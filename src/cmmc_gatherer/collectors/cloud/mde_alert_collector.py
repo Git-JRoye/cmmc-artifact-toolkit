@@ -67,7 +67,11 @@ Key incident fields pulled:
 
 WindowsDefenderATP application permissions required:
   Alert.Read.All for /api/alerts
-  Incident.Read.All for /api/incidents
+  Incident.Read.All for /api/incidents (OR Graph SecurityIncident.Read.All
+  as a fallback — if the MDE-native permission isn't available in the tenant,
+  the collector automatically falls back to the Graph Security API at
+  /security/incidents, which uses a different permission and response format
+  but provides the same incident lifecycle data)
 
 HONEST CONFIDENCE NOTE: /api/alerts is a long-stable, well-documented
 MDE API endpoint — materially higher confidence than newer MDE endpoints
@@ -102,14 +106,25 @@ _SEVERITY_TO_LEVEL = {
 
 class MdeAlertCollector(CollectorBase):
     """Collects Microsoft Defender for Endpoint alerts AND incidents with
-    full investigation/resolution lifecycle via the MDE API."""
+    full investigation/resolution lifecycle via the MDE API.
+
+    Accepts an optional ``graph`` client (GraphClient instance) as a
+    fallback for incident collection: if the MDE-native /api/incidents
+    endpoint returns 403 (missing Incident.Read.All in WindowsDefenderATP),
+    the collector retries via the Graph Security API (/security/incidents)
+    using the SecurityIncident.Read.All Graph permission instead. The
+    Graph response format differs but is mapped to the same SecurityEvent
+    structure so the report renderer needs no changes.
+    """
 
     def __init__(self, mde: MdeClient, lookback_hours: int = 168,
-                 max_alerts: int = 2000, max_incidents: int = 500):
+                 max_alerts: int = 2000, max_incidents: int = 500,
+                 graph=None):
         self.mde = mde
         self.lookback_hours = lookback_hours
         self.max_alerts = max_alerts
         self.max_incidents = max_incidents
+        self._graph = graph  # Optional GraphClient for incident fallback
 
     def collect(self) -> List[SecurityEvent]:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=self.lookback_hours)
@@ -175,16 +190,36 @@ class MdeAlertCollector(CollectorBase):
     # -- Incident collection ------------------------------------------------
 
     def _collect_incidents(self, cutoff_iso: str) -> List[SecurityEvent]:
+        """Pull incidents — tries MDE native API first, falls back to
+        Graph Security API if MDE returns 403 (missing Incident.Read.All).
+
+        The fallback requires a GraphClient with SecurityIncident.Read.All
+        to have been passed to the constructor.
+        """
+        try:
+            return self._collect_incidents_mde(cutoff_iso)
+        except Exception as mde_err:
+            resp = getattr(mde_err, "response", None)
+            status_code = getattr(resp, "status_code", None)
+            if status_code == 403 and self._graph is not None:
+                logger.info(
+                    "MDE /api/incidents returned 403 (missing Incident.Read.All) "
+                    "— falling back to Graph Security API (/security/incidents)"
+                )
+                try:
+                    return self._collect_incidents_graph(cutoff_iso)
+                except Exception as graph_err:
+                    detail = getattr(getattr(graph_err, "response", None), "text", None)
+                    if detail:
+                        logger.error("Graph Security incident collection also failed: %s | Response: %s", graph_err, detail[:500])
+                    else:
+                        logger.error("Graph Security incident collection also failed: %s", graph_err)
+                    return []
+            raise  # Re-raise non-403 errors for the outer handler
+
+    def _collect_incidents_mde(self, cutoff_iso: str) -> List[SecurityEvent]:
         """Pull MDE incidents from /api/incidents with the same defensive
         server-side-filter-then-fallback pattern as alerts.
-
-        The MDE Incident resource uses ``createdTime`` as its creation
-        timestamp (documented in the MDE API reference). Each incident
-        embeds an ``alerts`` array with the correlated alert objects —
-        we pull summary metadata from those (count, service sources,
-        detection sources, categories) rather than re-fetching them
-        individually, since _collect_alerts already got the full alert
-        detail separately.
 
         Required permission: WindowsDefenderATP -> Incident.Read.All
         """
@@ -198,6 +233,10 @@ class MdeAlertCollector(CollectorBase):
                     logger.warning("  MDE incident cap (%d) reached — more may exist", self.max_incidents)
                     break
         except Exception as filter_err:
+            # If 403, let it propagate — the caller handles Graph fallback
+            resp = getattr(filter_err, "response", None)
+            if resp is not None and getattr(resp, "status_code", None) == 403:
+                raise
             logger.warning(
                 "MDE /api/incidents $filter failed (%s) — falling back to unfiltered "
                 "fetch with client-side date filtering", filter_err,
@@ -214,6 +253,171 @@ class MdeAlertCollector(CollectorBase):
 
         logger.info("  MDE incidents: %d", len(out))
         return out
+
+    def _collect_incidents_graph(self, cutoff_iso: str) -> List[SecurityEvent]:
+        """Pull incidents from the Microsoft Graph Security API
+        (/security/incidents) as a fallback when the MDE-native endpoint
+        returns 403.
+
+        Uses SecurityIncident.Read.All (Graph permission) instead of
+        Incident.Read.All (WindowsDefenderATP permission). The response
+        format differs from MDE but is mapped to the same SecurityEvent
+        structure.
+
+        The ``$expand=alerts`` parameter requests the embedded alert array
+        so we can extract categories, service sources, and detection
+        sources — the same summary metadata _map_incident extracts from
+        the MDE response.
+        """
+        out: List[SecurityEvent] = []
+
+        try:
+            params = {
+                "$filter": f"createdDateTime ge {cutoff_iso}",
+                "$top": "100",
+                "$expand": "alerts",
+            }
+            for record in self._graph.get_all("security/incidents", params=params):
+                out.append(self._map_graph_incident(record))
+                if len(out) >= self.max_incidents:
+                    logger.warning("  Graph incident cap (%d) reached — more may exist", self.max_incidents)
+                    break
+        except Exception as filter_err:
+            logger.warning(
+                "Graph /security/incidents $filter failed (%s) — falling back "
+                "to unfiltered fetch with client-side date filtering", filter_err,
+            )
+            out.clear()
+            try:
+                for record in self._graph.get_all("security/incidents", params={"$expand": "alerts"}):
+                    created = record.get("createdDateTime") or ""
+                    if created < cutoff_iso:
+                        continue
+                    out.append(self._map_graph_incident(record))
+                    if len(out) >= self.max_incidents:
+                        logger.warning("  Graph incident cap (%d) reached — more may exist", self.max_incidents)
+                        break
+            except Exception:
+                raise filter_err  # Surface the original error
+
+        logger.info("  Graph Security incidents: %d", len(out))
+        return out
+
+    @staticmethod
+    def _map_graph_incident(record: dict) -> SecurityEvent:
+        """Map a Microsoft Graph Security Incident to a SecurityEvent.
+
+        Graph Security incidents use different field names and casing than
+        the MDE API, but the output SecurityEvent uses the same source
+        ("MDE Incidents") and event_data structure so the report renderer
+        works identically regardless of which API provided the data.
+
+        Key field differences from MDE:
+          - ``id`` (str) instead of ``incidentId`` (int)
+          - ``displayName`` instead of ``incidentName``
+          - ``createdDateTime`` instead of ``createdTime``
+          - ``lastUpdateDateTime`` instead of ``lastUpdateTime``
+          - Severity/status values are lowercase
+          - ``customTags`` instead of ``tags``
+        """
+        # Graph returns lowercase severity: "high", "medium", "low", "informational"
+        severity_raw = (record.get("severity") or "informational").lower()
+        severity_map = {"high": "High", "medium": "Medium", "low": "Low"}
+        severity = severity_map.get(severity_raw, "Informational")
+        level = _SEVERITY_TO_LEVEL.get(severity, "Information")
+
+        incident_name = record.get("displayName") or "Security Incident"
+        incident_id = record.get("id") or ""
+
+        # Graph status values: "active", "resolved", "inProgress", "redirected"
+        status_raw = (record.get("status") or "unknown").lower()
+        status_map = {
+            "active": "Active", "resolved": "Resolved",
+            "inprogress": "InProgress", "redirected": "Redirected",
+        }
+        status = status_map.get(status_raw, status_raw.capitalize())
+
+        classification = record.get("classification") or ""
+        determination = record.get("determination") or ""
+        assigned_to = record.get("assignedTo") or ""
+
+        # Embedded alerts — may or may not be present depending on $expand
+        embedded_alerts = record.get("alerts") or []
+        alert_count = len(embedded_alerts)
+        active_alerts = sum(
+            1 for a in embedded_alerts
+            if (a.get("status") or "").lower() != "resolved"
+        )
+
+        categories = sorted({
+            a.get("category") or "Unknown"
+            for a in embedded_alerts if a.get("category")
+        })
+        service_sources = sorted({
+            a.get("serviceSource") or ""
+            for a in embedded_alerts if a.get("serviceSource")
+        })
+        detection_sources = sorted({
+            a.get("detectionSource") or ""
+            for a in embedded_alerts if a.get("detectionSource")
+        })
+
+        # Graph Security alerts embed device info differently — try
+        # computerDnsName first, then fall back to evidence array
+        impacted_devices = set()
+        for a in embedded_alerts:
+            dns = a.get("computerDnsName") or a.get("deviceDnsName") or ""
+            if dns:
+                impacted_devices.add(dns)
+            # Also check evidence entries for device names
+            for ev in (a.get("evidence") or []):
+                dev_name = ev.get("deviceDnsName") or ""
+                if dev_name:
+                    impacted_devices.add(dev_name)
+        impacted_devices = sorted(impacted_devices)
+
+        # Build message in the same format as _map_incident
+        message_parts = [f"[MDE Incident] {incident_name} — Status: {status}"]
+        if classification and classification.lower() not in ("unknown", ""):
+            message_parts.append(f"Classification: {classification}")
+        if determination and determination.lower() not in ("unknown", ""):
+            message_parts.append(f"Determination: {determination}")
+        if categories:
+            message_parts.append(f"Categories: {', '.join(categories)}")
+        message_parts.append(f"Alerts: {active_alerts} active / {alert_count} total")
+        if assigned_to:
+            message_parts.append(f"Assigned to: {assigned_to}")
+        message = " | ".join(message_parts)
+
+        computer = impacted_devices[0] if impacted_devices else "N/A"
+
+        return SecurityEvent(
+            event_id=0,
+            source="MDE Incidents",
+            timestamp=record.get("createdDateTime") or record.get("lastUpdateDateTime") or "",
+            message=message,
+            level=level,
+            computer=computer,
+            user=assigned_to or None,
+            event_data={
+                "incident_id": incident_id,
+                "incident_name": incident_name,
+                "severity": severity,
+                "status": status,
+                "classification": classification,
+                "determination": determination,
+                "assigned_to": assigned_to,
+                "created_time": record.get("createdDateTime"),
+                "last_update_time": record.get("lastUpdateDateTime"),
+                "alert_count": alert_count,
+                "active_alert_count": active_alerts,
+                "categories": categories,
+                "service_sources": service_sources,
+                "detection_sources": detection_sources,
+                "impacted_devices": impacted_devices,
+                "tags": record.get("customTags") or record.get("tags") or [],
+            },
+        )
 
     @staticmethod
     def _map_incident(record: dict) -> SecurityEvent:

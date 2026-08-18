@@ -380,11 +380,14 @@ class TenantOrchestrator:
         # Isolated from device collection: uses the same mde_client but a
         # different API endpoint (/api/alerts + /api/incidents vs. /api/machines).
         # Failure here never affects device health data or any other collector.
-        # Requires WindowsDefenderATP -> Alert.Read.All + Incident.Read.All.
+        # Requires WindowsDefenderATP -> Alert.Read.All for alerts. For
+        # incidents, tries Incident.Read.All (WindowsDefenderATP) first;
+        # if that returns 403, falls back to SecurityIncident.Read.All
+        # (Graph) via the graph client passed here.
         events_mde_alerts: List = []
         if mde_client is not None:
             try:
-                events_mde_alerts = MdeAlertCollector(mde_client).collect()
+                events_mde_alerts = MdeAlertCollector(mde_client, graph=graph).collect()
             except Exception as e:
                 logger.error("[%s] MDE alert/incident collector failed: %s", profile.tenant_key, e)
                 errors.append(f"mde_alerts: {e}")
