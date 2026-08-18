@@ -54,7 +54,7 @@ class ComplianceScorer:
     DIMENSION_DESCRIPTIONS = {
         'firewall': "Windows Firewall enabled across all profiles (Domain/Private/Public) on on-prem endpoints, plus real per-device firewall status for Intune-managed cloud devices.",
         'antivirus': "Antivirus / Windows Defender real-time protection active on on-prem endpoints, plus real per-device real-time protection status for Intune-managed cloud devices.",
-        'updates': "On-prem endpoints have installed patch/hotfix history recorded (presence check, not recency).",
+        'updates': "On-prem endpoints have installed patch/hotfix history recorded (presence check, not recency). Intune-managed environments are scored on Windows Update Ring policy configuration — quality-update deferral window (≤7 days) and automatic installation mode.",
         'policies': "Local security policy, UAC, audit policy, Conditional Access, and Intune configuration profiles meeting their individual baselines.",
         'event_logging': "Ratio of Critical/Error security events to total events collected (lower ratio scores higher).",
         'ad_security': "AD/Entra accounts that are either disabled or not stale (i.e. actively used and appropriately managed).",
@@ -224,15 +224,40 @@ class ComplianceScorer:
 
     @classmethod
     def _score_updates(cls, artifacts: ArtifactCollection) -> Optional[int]:
-        # NOTE: this only checks whether ANY hotfix history was collected, not
-        # whether the endpoint is current against the latest available patches
-        # — real recency-based patch scoring needs an external patch-baseline
-        # source and is a good candidate for a future enhancement.
-        applicable = cls._onprem_endpoints(artifacts)
-        if not applicable:
+        """Blends on-prem patch history with Intune Update Ring policy
+        configuration — the latter proves the organization HAS a managed
+        patch deployment process for cloud-managed devices (deferral
+        window, automatic installation mode), which is the control-existence
+        evidence SI.L1-3.14.1 calls for.
+
+        On-prem: per-endpoint presence of installed patch/hotfix history.
+        Cloud: per-setting pass/fail on scoreable Update Ring settings
+        (QualityUpdateDeferralDays, AutomaticUpdateMode — same rules
+        already used in _map_update_ring_policy).  FeatureUpdateDeferralDays
+        is informational-only ("Configured" status) and excluded here,
+        same as the generic _policy_passes logic already does.
+        """
+        # On-prem: same as before — presence check, not recency
+        onprem = cls._onprem_endpoints(artifacts)
+        onprem_scores = [100 if ep.installed_updates else 0 for ep in onprem]
+
+        # Cloud: Intune Update Ring policies — only the settings that
+        # have a real pass/fail verdict (status Enabled/Disabled), not
+        # informational-only ones (status "Configured").
+        cloud_scores: list[int] = []
+        for p in artifacts.policies:
+            if p.policy_type != "Intune Update Ring":
+                continue
+            if p.status == "Enabled":
+                cloud_scores.append(100)
+            elif p.status == "Disabled":
+                cloud_scores.append(0)
+            # "Configured" (e.g. FeatureUpdateDeferralDays) — skip
+
+        all_scores = onprem_scores + cloud_scores
+        if not all_scores:
             return None
-        patched = sum(1 for ep in applicable if ep.installed_updates)
-        return int((patched / len(applicable)) * 100)
+        return int(sum(all_scores) / len(all_scores))
 
     # -- policy dimension ------------------------------------------------------
 
