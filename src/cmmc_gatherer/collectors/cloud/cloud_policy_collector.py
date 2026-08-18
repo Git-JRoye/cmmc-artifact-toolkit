@@ -15,15 +15,26 @@ the current scorer, MSP report, and coverage logic work unchanged:
     Antivirus, Firewall, Disk Encryption, Account Protection, and Attack
     Surface Reduction profiles)
 
-HONEST CONFIDENCE NOTE on Endpoint Security policies: this is a new,
-genuinely unverified addition. deviceManagement/configurationPolicies (the
-"Settings Catalog" collection Endpoint Security policies are built on) is a
-real, documented Graph resource, but the exact shape of its per-device
-deployment status is not confirmed — this collector calls
-.../deviceStatuses (a per-device list, aggregated client-side into
-success/failed counts here), not .../deviceStatusOverview (the aggregate
-object the deviceConfigurations profiles above use). If deviceStatuses
-404s, deviceStatusOverview is the fallback hypothesis to try next — the
+CONFIRMED FIX: deviceManagement/configurationPolicies (the "Settings
+Catalog" collection Endpoint Security policies are built on) is a beta-only
+Graph resource — it has no v1.0 API reference page at all, only a beta one.
+Calling it under /v1.0 (this collector's original mistake) produces exactly
+the "Resource not found for the segment 'configurationPolicies'" 400 seen
+against a real tenant. Fixed by routing both the policy list call and the
+per-policy .../deviceStatuses call through a dedicated
+``self._beta_graph = graph.with_api_version("beta")`` client, the same
+escape hatch (and the same class of bug) already used by the Intune device
+collector for its own beta-only calls.
+
+HONEST CONFIDENCE NOTE on Endpoint Security policies (still open): the
+exact shape of per-device deployment status is not confirmed — this
+collector calls .../deviceStatuses (a per-device list, aggregated
+client-side into success/failed counts here), not .../deviceStatusOverview
+(the aggregate object the deviceConfigurations profiles above use), and
+Microsoft's own resource reference for deviceManagementConfigurationPolicy
+does not document deviceStatuses as a listed relationship at all — so this
+sub-call may still 404 even now that the base path is corrected. If it
+does, deviceStatusOverview is the fallback hypothesis to try next — the
 response body is logged either way so that's a real decision, not a guess,
 if it comes to that. templateReference.templateFamily (and, as a fallback,
 templateDisplayName) are used to identify which Endpoint Security category
@@ -112,6 +123,16 @@ class CloudPolicyCollector(CollectorBase):
 
     def __init__(self, graph: GraphClient):
         self.graph = graph
+        # deviceManagement/configurationPolicies (Settings Catalog / Endpoint
+        # Security policies) is a beta-only Graph resource — confirmed against
+        # Microsoft's own Graph API reference (the v1.0 docs for this resource
+        # don't exist; the resource and its list operation are documented only
+        # under /beta). Calling it under /v1.0 is exactly the "Resource not
+        # found for the segment" class of error this project's GraphClient
+        # already has a named escape hatch for (see with_api_version's
+        # docstring) — same pattern already used by the Intune device
+        # collector for its own beta-only calls.
+        self._beta_graph = graph.with_api_version("beta")
 
     def collect(self) -> List[Policy]:
         policies: List[Policy] = []
@@ -640,7 +661,7 @@ class CloudPolicyCollector(CollectorBase):
         """
         out: List[Policy] = []
         try:
-            for p in self.graph.get_all("deviceManagement/configurationPolicies"):
+            for p in self._beta_graph.get_all("deviceManagement/configurationPolicies"):
                 policy_id = p.get("id")
                 name = p.get("displayName") or policy_id or "Unnamed Endpoint Security Policy"
                 template_label = self._endpoint_security_template_label(p)
@@ -732,7 +753,7 @@ class CloudPolicyCollector(CollectorBase):
         success = 0
         failed = 0
         unrecognized = set()
-        for record in self.graph.get_all(f"deviceManagement/configurationPolicies/{policy_id}/deviceStatuses"):
+        for record in self._beta_graph.get_all(f"deviceManagement/configurationPolicies/{policy_id}/deviceStatuses"):
             status = record.get("status")
             if status == "success":
                 success += 1
