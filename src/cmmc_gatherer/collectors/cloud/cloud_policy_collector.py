@@ -36,11 +36,15 @@ CONFIRMED FIX (verified against real Tenguard tenant 2026-08-17):
      non-Endpoint-Security ones correctly skipped (templateFamily=none).
 
 Honest scope, matching the pattern set by every other collector in this
-project: this reports whether a Conditional Access policy is actually
-enforced (state == 'enabled'), not whether its underlying conditions and
-grant controls are well-designed — a CA policy that's "enabled" but only
-targets a single test user and requires nothing meaningful still counts as
-"Enabled" here. Likewise for Intune configuration profiles, this reports
+project: Conditional Access policies are scored pass/fail strictly on their
+enforcement state (state == 'enabled'), BUT the full policy detail —
+conditions (who/what/where), grant controls (MFA, compliant device, etc.),
+and session controls — is now parsed and displayed in the report so an
+assessor can see what each policy actually does, not just that it's
+"Enabled". The scoring doesn't judge whether the controls are well-designed
+(an enabled policy targeting a single test user still scores "Enabled"),
+but the description now makes that visible rather than hiding it.
+Likewise for Intune configuration profiles, this reports
 per-profile deployment success/failure counts, not the content of each
 platform-specific setting inside the profile (that schema varies enormously
 by @odata.type and platform, and parsing every individual setting is a much
@@ -166,10 +170,24 @@ class CloudPolicyCollector(CollectorBase):
 
     # -- Conditional Access -------------------------------------------------
 
+    # Human-readable labels for grantControls.builtInControls values.
+    _GRANT_CONTROL_LABELS = {
+        'mfa': 'MFA',
+        'compliantDevice': 'Compliant Device',
+        'domainJoinedDevice': 'Hybrid Azure AD Join',
+        'approvedApplication': 'Approved App',
+        'compliantApplication': 'App Protection Policy',
+        'passwordChange': 'Password Change',
+        'block': 'Block Access',
+    }
+
     def _collect_conditional_access(self) -> List[Policy]:
         out: List[Policy] = []
-        params = {"$select": "id,displayName,state,createdDateTime,modifiedDateTime"}
-        for p in self.graph.get_all("identity/conditionalAccess/policies", params=params):
+        # No $select — fetch the full CA policy object so we can parse
+        # conditions, grantControls, and sessionControls into a meaningful
+        # summary for assessors. Zero additional API calls vs the old
+        # narrow fetch; the endpoint returns everything in one shot.
+        for p in self.graph.get_all("identity/conditionalAccess/policies"):
             # Graph's real state values: 'enabled', 'disabled',
             # 'enabledForReportingButNotEnforced'. Mapped to the same
             # Enabled/Disabled vocabulary the rest of the report uses, with
@@ -178,17 +196,145 @@ class CloudPolicyCollector(CollectorBase):
             # risk than a plainly disabled policy.
             state = p.get("state") or "unknown"
             status = "Enabled" if state == "enabled" else "Disabled"
+            summary = self._summarize_ca_policy(p)
             out.append(Policy(
                 policy_name=p.get("displayName") or p.get("id") or "Unnamed CA Policy",
                 policy_type="Conditional Access",
                 status=status,
-                target="Tenant",
-                value=state,
-                description="Entra Conditional Access policy enforcement state",
+                target=summary.get("target", "Tenant"),
+                value=summary.get("value", state),
+                description=summary.get("description", "Entra Conditional Access policy"),
                 last_applied=p.get("modifiedDateTime") or p.get("createdDateTime"),
             ))
         logger.info("  Conditional Access policies: %d", len(out))
         return out
+
+    @classmethod
+    def _summarize_ca_policy(cls, p: dict) -> dict:
+        """Parse a full CA policy object into a human-readable summary.
+
+        Returns a dict with 'target', 'value', and 'description' keys
+        suitable for the Policy record. Defensive throughout — every field
+        might be absent or shaped differently than expected, so .get()
+        chains and fallbacks everywhere.
+        """
+        conditions = p.get("conditions") or {}
+        grant = p.get("grantControls") or {}
+        session = p.get("sessionControls") or {}
+
+        # -- Who does it target? --
+        users_cond = conditions.get("users") or {}
+        target_parts: list[str] = []
+        inc_users = users_cond.get("includeUsers") or []
+        inc_groups = users_cond.get("includeGroups") or []
+        inc_roles = users_cond.get("includeRoles") or []
+        exc_users = users_cond.get("excludeUsers") or []
+        exc_groups = users_cond.get("excludeGroups") or []
+
+        if "All" in inc_users:
+            target_parts.append("All Users")
+        elif "GuestsOrExternalUsers" in inc_users:
+            target_parts.append("Guests/External Users")
+        else:
+            if inc_users:
+                target_parts.append(f"{len(inc_users)} user(s)")
+            if inc_groups:
+                target_parts.append(f"{len(inc_groups)} group(s)")
+        if inc_roles:
+            target_parts.append(f"{len(inc_roles)} role(s)")
+
+        exclusion_count = len(exc_users) + len(exc_groups)
+        if exclusion_count:
+            target_parts.append(f"{exclusion_count} exclusion(s)")
+
+        target_str = ", ".join(target_parts) if target_parts else "Tenant"
+
+        # -- Which apps? --
+        apps_cond = conditions.get("applications") or {}
+        inc_apps = apps_cond.get("includeApplications") or []
+        if "All" in inc_apps:
+            apps_str = "All Cloud Apps"
+        elif "Office365" in inc_apps:
+            apps_str = "Office 365"
+        elif inc_apps:
+            apps_str = f"{len(inc_apps)} app(s)"
+        else:
+            apps_str = ""
+
+        # -- What does it require? --
+        built_in = grant.get("builtInControls") or []
+        operator = grant.get("operator") or "OR"
+        control_labels = [cls._GRANT_CONTROL_LABELS.get(c, c) for c in built_in]
+
+        # -- Session controls --
+        session_parts: list[str] = []
+        sign_in_freq = session.get("signInFrequency") or {}
+        if sign_in_freq.get("isEnabled"):
+            freq_val = sign_in_freq.get("value", "")
+            freq_type = sign_in_freq.get("type", "")
+            if freq_val and freq_type:
+                session_parts.append(f"sign-in every {freq_val} {freq_type}")
+        persist = session.get("persistentBrowser") or {}
+        if persist.get("isEnabled"):
+            mode = persist.get("mode", "")
+            if mode:
+                session_parts.append(f"persistent browser: {mode}")
+
+        # -- Platforms --
+        platforms_cond = conditions.get("platforms") or {}
+        inc_platforms = platforms_cond.get("includePlatforms") or []
+        if inc_platforms and "all" not in [s.lower() for s in inc_platforms]:
+            platform_str = ", ".join(inc_platforms)
+        else:
+            platform_str = ""
+
+        # -- Client app types --
+        client_types = conditions.get("clientAppTypes") or []
+
+        # -- Risk levels --
+        sign_in_risk = conditions.get("signInRiskLevels") or []
+        user_risk = conditions.get("userRiskLevels") or []
+
+        # -- Build the compact value line --
+        value_parts: list[str] = []
+        if control_labels:
+            joiner = f" {operator} " if len(control_labels) > 1 else ""
+            value_parts.append("Requires: " + joiner.join(control_labels))
+        value_parts.append(f"Targets: {target_str}")
+        if apps_str:
+            value_parts.append(f"Apps: {apps_str}")
+        value_line = " | ".join(value_parts) if value_parts else p.get("state", "unknown")
+
+        # -- Build the longer description --
+        desc_parts: list[str] = []
+        state_label = p.get("state", "unknown")
+        desc_parts.append(f"Enforcement: {state_label}.")
+
+        if control_labels:
+            joiner = f" {operator} "
+            desc_parts.append(f"Grant controls: {joiner.join(control_labels)}.")
+        else:
+            desc_parts.append("No grant controls configured (allow by default).")
+
+        desc_parts.append(f"Targets {target_str}.")
+        if apps_str:
+            desc_parts.append(f"Applies to {apps_str}.")
+        if platform_str:
+            desc_parts.append(f"Platforms: {platform_str}.")
+        if client_types:
+            desc_parts.append(f"Client types: {', '.join(client_types)}.")
+        if sign_in_risk:
+            desc_parts.append(f"Sign-in risk levels: {', '.join(sign_in_risk)}.")
+        if user_risk:
+            desc_parts.append(f"User risk levels: {', '.join(user_risk)}.")
+        if session_parts:
+            desc_parts.append(f"Session: {'; '.join(session_parts)}.")
+
+        return {
+            "target": target_str,
+            "value": value_line,
+            "description": " ".join(desc_parts),
+        }
 
     # -- Intune configuration profiles ---------------------------------------
 
