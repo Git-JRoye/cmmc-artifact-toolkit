@@ -126,11 +126,7 @@ _BASE_CSS = """
                       font-size: 2em; font-weight: normal; letter-spacing: 0.3px; }
         .header .subtitle { font-size: 1em; color: #94a3b8; margin-top: 6px;
                              text-transform: uppercase; letter-spacing: 1.5px; }
-        .content { max-width: 920px; margin: 0 auto; padding: 40px 30px; }
-        .section-wide { width: 100vw; position: relative;
-                        left: 50%; margin-left: -50vw;
-                        padding-left: 30px; padding-right: 30px;
-                        box-sizing: border-box; }
+        .content { max-width: 98%; margin: 0 auto; padding: 40px 30px; }
         .section { margin: 34px 0; page-break-inside: avoid; }
         .section h2 { font-family: Georgia, 'Times New Roman', serif; font-weight: normal;
                        font-size: 1.3em; color: #1e293b; border-bottom: 1px solid #cbd5e1;
@@ -216,8 +212,6 @@ _BASE_CSS = """
         @page { size: landscape; margin: 0.4in; }
         @media print {
             .content { max-width: 100%; padding: 6px 10px; }
-            .section-wide { width: auto; position: static; left: auto;
-                            margin-left: 0; padding-left: 0; padding-right: 0; }
             table { font-size: 0.68em; table-layout: auto; }
             th, td { padding: 4px 5px; }
             /* Only data cells get word-break — header labels are short,
@@ -506,13 +500,13 @@ class MSPReportExporter(ExporterBase):
 """
 
         if onprem_eps:
-            html += f"""        <div class="section section-wide" id="sec-onprem-endpoints">
+            html += f"""        <div class="section" id="sec-onprem-endpoints">
             <h2>On-Prem Endpoint Status</h2>
             {self._satisfies_badge_html(['firewall_status', 'antivirus_status', 'patch_level'], present_evidence)}
             <table>
                 <tr>
                     <th>Hostname</th><th>IP Address</th><th>OS Version</th>
-                    <th>Firewall</th><th>Antivirus</th><th>MDE Onboarded</th>
+                    <th>Firewall</th><th>Antivirus</th><th>MDE Onboarded</th><th>Sensor Health</th>
                     <th>Also Cloud-Managed (Intune)</th>
                     <th>Installed Software</th>
                 </tr>
@@ -538,10 +532,11 @@ class MSPReportExporter(ExporterBase):
                     cloud_cell = '<span class="na">No</span>'
                 html += (
                     f"                <tr><td>{ep.hostname}{self._asset_category_note(ep)}</td><td>{ep.ip_address}</td>"
-                    f"<td>{ep.os_version}</td>"
+                    f"<td>{self._friendly_os_version(ep.os_version)}</td>"
                     f"<td><span class=\"{fw_color}\">{ep.firewall_status or 'Unknown'}{fw_note}</span></td>"
                     f"<td><span class=\"{av_color}\">{ep.antivirus_status or 'Unknown'}</span></td>"
                     f"<td>{self._mde_onboarding_cell(ep)}</td>"
+                    f"<td>{self._mde_sensor_health_cell(ep)}</td>"
                     f"<td>{cloud_cell}</td>"
                     f"<td>{self._software_cell(ep, software_href)}</td>"
                     f"</tr>\n"
@@ -549,14 +544,14 @@ class MSPReportExporter(ExporterBase):
             html += "            </table>\n        </div>\n"
 
         if cloud_eps:
-            html += f"""        <div class="section section-wide" id="sec-cloud-devices">
+            html += f"""        <div class="section" id="sec-cloud-devices">
             <h2>Cloud-Managed Devices (Intune)</h2>
             {self._satisfies_badge_html(['bitlocker_key_escrow', 'cloud_realtime_malware_protection', 'cloud_firewall_status'], present_evidence)}
             <table>
                 <tr>
                     <th>Hostname</th><th>OS Version</th><th>Compliance State</th>
                     <th>Encrypted</th><th>Recovery Key Escrowed</th><th>Firewall</th><th>Real-Time Protection</th>
-                    <th>MDE Onboarded</th>
+                    <th>MDE Onboarded</th><th>Sensor Health</th>
                     <th>Management State</th><th>Ownership</th><th>Owner</th>
                     <th>Installed Software</th>
                 </tr>
@@ -611,13 +606,14 @@ class MSPReportExporter(ExporterBase):
                     ownership_cell = '<span class="na">Unknown</span>'
 
                 html += (
-                    f"                <tr><td>{ep.hostname}{self._asset_category_note(ep)}</td><td>{ep.os_version}</td>"
+                    f"                <tr><td>{ep.hostname}{self._asset_category_note(ep)}</td><td>{self._friendly_os_version(ep.os_version)}</td>"
                     f"<td><span class=\"{comp_color}\">{meta.get('compliance_state', 'Unknown')}</span></td>"
                     f"<td><span class=\"{enc_color}\">{enc}</span></td>"
                     f"<td>{escrow_cell}</td>"
                     f"<td>{fw_cell}</td>"
                     f"<td>{rtp_cell}</td>"
                     f"<td>{self._mde_onboarding_cell(ep)}</td>"
+                    f"<td>{self._mde_sensor_health_cell(ep)}</td>"
                     f"<td>{meta.get('management_state', 'Unknown')}</td>"
                     f"<td>{ownership_cell}</td>"
                     f"<td>{meta.get('owner_upn', 'Unknown')}</td>"
@@ -627,7 +623,7 @@ class MSPReportExporter(ExporterBase):
 
         ad_users = self._ad_users(artifacts)
         if ad_users:
-            html += f"""        <div class="section section-wide" id="sec-ad-users">
+            html += f"""        <div class="section" id="sec-ad-users">
             <h2>Active Directory / Identity Objects — Users</h2>
             {self._satisfies_badge_html(['mfa_registration', 'account_identification', 'privileged_role_tracking', 'auth_method_detail'], present_evidence)}
             <p style="font-size:0.88em;color:#64748b;">
@@ -748,7 +744,7 @@ class MSPReportExporter(ExporterBase):
             high_priv_sps = [sp for sp in service_principals if (sp.attributes or {}).get('high_privilege_permissions')]
             apps_link_href = apps_href or "enterprise_apps.html"
             high_priv_rows_html = "".join(self._service_principal_row_html(sp) for sp in high_priv_sps)
-            html += f"""        <div class="section section-wide" id="sec-enterprise-apps">
+            html += f"""        <div class="section" id="sec-enterprise-apps">
             <h2>Enterprise Applications</h2>
             {self._satisfies_badge_html(['enterprise_app_inventory', 'high_privilege_app_permission'], present_evidence)}
             <p style="font-size:0.92em;color:#475569;">
@@ -1992,6 +1988,73 @@ class MSPReportExporter(ExporterBase):
         if status:
             return f'<span class="status-bad">{status}</span>'
         return '<span class="na">N/A</span>'
+
+    @staticmethod
+    def _mde_sensor_health_cell(ep: Any) -> str:
+        """Render the MDE sensor health status (Active, Inactive, etc.)
+        from the mde_atp_health_status metadata field populated by
+        DefenderDeviceCollector → orchestrator._apply_mde_atp_data.
+        Same hybrid-device check pattern as _mde_onboarding_cell."""
+        meta = ep.metadata or {}
+        status = meta.get('mde_atp_health_status')
+        if status is None:
+            intune_meta = meta.get('intune')
+            if isinstance(intune_meta, dict):
+                status = intune_meta.get('mde_atp_health_status')
+
+        if not status:
+            return '<span class="na">N/A</span>'
+        if status.lower() == 'active':
+            return '<span class="status-good">Active</span>'
+        if status.lower() == 'inactive':
+            return '<span class="status-bad">Inactive</span>'
+        return f'<span class="status-warn">{status}</span>'
+
+    @staticmethod
+    def _friendly_os_version(raw_version: str) -> str:
+        """Convert a raw OS version string like 'Windows 10.0.26100.8737'
+        into a friendlier display like 'Windows 11 24H2 (26100.8737)'.
+
+        Windows build-number-to-feature-update mapping (from Microsoft's
+        official release information pages). The major build number (the
+        third segment of the version) determines the feature update, and
+        whether it's Windows 10 or 11.
+        """
+        # Windows 11 builds
+        _WIN11_BUILDS = {
+            '22000': '21H2', '22621': '22H2', '22631': '23H2',
+            '26100': '24H2', '26200': '25H2',
+        }
+        # Windows 10 builds
+        _WIN10_BUILDS = {
+            '19041': '2004', '19042': '20H2', '19043': '21H1',
+            '19044': '21H2', '19045': '22H2',
+        }
+
+        if not raw_version:
+            return raw_version or "Unknown"
+
+        # Try to extract build segments from patterns like:
+        #   "Windows 10.0.26100.8737"  or  "10.0.26100.8737"
+        import re
+        m = re.search(r'(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?', raw_version)
+        if not m:
+            return raw_version
+
+        major, minor, build, patch = m.group(1), m.group(2), m.group(3), m.group(4) or ''
+        build_patch = f"{build}.{patch}" if patch else build
+
+        feature = _WIN11_BUILDS.get(build)
+        if feature:
+            return f"Windows 11 {feature} ({build_patch})"
+
+        feature = _WIN10_BUILDS.get(build)
+        if feature:
+            return f"Windows 10 {feature} ({build_patch})"
+
+        # Unknown build — return original but try to clean up "Windows 10.0.x"
+        # into at least "Windows (10.0.x)"
+        return raw_version
 
     @staticmethod
     def _software_list(ep: Any) -> List[Dict[str, Any]]:
