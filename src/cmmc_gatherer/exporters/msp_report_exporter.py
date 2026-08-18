@@ -185,6 +185,44 @@ _BASE_CSS = """
         .domain-nav a:hover { border-bottom-style: solid; }
         details summary { cursor: pointer; color: #2c4a6b; font-size: 0.92em; }
         .back-link { display: inline-block; margin-bottom: 20px; font-size: 0.92em; }
+
+        /* Print / "Save as PDF" support. The widest tables in this report
+           (Cloud-Managed Devices has 12 columns; AD Users has 7, several
+           with long free-text values) simply don't fit an 8.5in portrait
+           page at the on-screen 920px layout — the browser doesn't shrink
+           content to fit, it clips whatever runs past the page edge, which
+           is why columns went missing when printed. Fixed here, once, for
+           every page that shares this stylesheet, rather than relying on
+           someone remembering to pick "Landscape" + a custom scale in the
+           print dialog each time:
+             - @page forces landscape, which on Letter/A4 roughly doubles
+               the usable width (11in vs 8.5in) — the single biggest factor
+               in whether a wide table fits.
+             - The 920px on-screen width cap is lifted so content uses the
+               full printable page width instead of a fixed pixel value
+               that has no relationship to the physical page.
+             - Table font-size/padding shrink (screen values are sized for
+               comfortable on-screen reading, not for fitting 12 columns on
+               paper) and long unbroken values (hostnames, GUIDs, the
+               comma-joined auth-method lists) are allowed to wrap instead
+               of forcing the table wider than the page.
+             - tr avoids splitting across a page break — a row cut in half
+               between two pages is hard to read even when nothing is
+               technically missing. */
+        @page { size: landscape; margin: 0.4in; }
+        @media print {
+            .content { max-width: 100%; padding: 6px 10px; }
+            table { font-size: 0.68em; table-layout: auto; }
+            th, td { padding: 4px 5px; }
+            /* Only data cells get word-break — header labels are short,
+               controlled text (e.g. "OWNERSHIP") that looks worse broken
+               mid-word than left to size its own column slightly wider;
+               td values (emails, GUIDs, comma-joined lists) are the ones
+               genuinely long enough to need forced wrapping. */
+            td { word-break: break-word; }
+            tr { page-break-inside: avoid; }
+            .back-link { display: none; }
+        }
 """
 
 
