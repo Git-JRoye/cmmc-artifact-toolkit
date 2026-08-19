@@ -286,6 +286,14 @@ class ComplianceScorer:
             # upper bound — NIST 800-171 says "after a defined period",
             # 15 minutes is a widely accepted threshold).
             'MaxInactivityTimeDeviceLock': lambda v: 0 < v <= 15,
+            # Password complexity (IA.L2-3.5.7). DeviceLock CSP values:
+            #   0 = digits only, 1 = digits+lower, 2 = +upper,
+            #   3 = +special, 4 = AD complexity (3 of 4 categories).
+            # Value >= 3 satisfies CMMC L2 complexity requirements.
+            'PasswordComplexity': lambda v: v >= 3,
+            # Minimum password age (IA.L2-3.5.8). Must be >0 days to
+            # prevent users from cycling through password history.
+            'MinimumPasswordAge': lambda v: v > 0,
         }
         if p.policy_name in thresholds:
             try:

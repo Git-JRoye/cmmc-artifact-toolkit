@@ -899,29 +899,47 @@ class CloudPolicyCollector(CollectorBase):
     #   'choice'  → choiceSettingValue.value (string, typically ends with
     #               _0 or _1 for boolean-style choices)
     #
-    # HONEST CONFIDENCE NOTE: the exact settingDefinitionId strings below
-    # are recalled with moderate confidence — they follow the documented
-    # pattern (device_vendor_msft_policy_config_<csp>_<setting>) but have
-    # NOT been independently verified against a live tenant's
-    # configurationPolicies/{id}/settings response. If the real IDs differ,
-    # the unrecognized settings are logged (not silently dropped) so the
-    # correct IDs can be added from real output.
+    # The DeviceLock CSP contains TWO sets of similarly-named settings:
+    #   - Mobile-oriented: MinDevicePasswordLength, DevicePasswordHistory,
+    #     MaxDevicePasswordFailedAttempts, DevicePasswordEnabled, …
+    #   - Desktop-oriented: MinimumPasswordLength, PasswordHistorySize,
+    #     PasswordComplexity, ClearTextPassword, MaximumPasswordAge, …
+    #
+    # Windows 10/11 Settings Catalog profiles (the kind an MSP creates in
+    # the Intune admin center under "Settings catalog" for a CMMC password
+    # policy) use the DESKTOP names.  The mobile names are kept as fallbacks
+    # in case a profile happens to use them.
+    #
+    # The LocalPoliciesSecurityOptions CSP does NOT contain password-length,
+    # history, complexity, or lockout settings — those all live in DeviceLock.
+    # (LocalPoliciesSecurityOptions has InteractiveLogon_MachineInactivityLimit
+    # and Accounts_LimitLocalAccountUseOfBlankPasswordsToConsoleLogonOnly,
+    # which are different controls.)
+    #
+    # VERIFIED against Microsoft's published DeviceLock CSP reference:
+    # learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-devicelock
     _SETTINGS_CATALOG_KNOWN_SETTINGS = {
-        # DeviceLock CSP
+        # DeviceLock CSP — desktop-oriented (primary, used by Settings
+        # Catalog profiles on Windows 10/11):
+        'devicelock_minimumpasswordlength': ('MinimumPasswordLength', 'integer'),
+        'devicelock_passwordhistorysize': ('PasswordHistorySize', 'integer'),
+        'devicelock_passwordcomplexity': ('PasswordComplexity', 'integer'),
+        'devicelock_maxinactivitytimedevicelock': ('MaxInactivityTimeDeviceLock', 'integer'),
+        'devicelock_cleartextpassword': ('ClearTextPassword', 'choice'),
+        'devicelock_maximumpasswordage': ('MaximumPasswordAge', 'integer'),
+        'devicelock_minimumpasswordage': ('MinimumPasswordAge', 'integer'),
+        'devicelock_allowadministratorlockout': ('AllowAdministratorLockout', 'choice'),
+        # DeviceLock CSP — mobile-oriented equivalents (fallback — some
+        # profiles may use these older setting names):
         'devicelock_mindevicepasswordlength': ('MinimumPasswordLength', 'integer'),
         'devicelock_devicepasswordhistory': ('PasswordHistorySize', 'integer'),
         'devicelock_maxdevicepasswordfailedattempts': ('LockoutBadCount', 'integer'),
-        'devicelock_maxinactivitytimedevicelock': ('MaxInactivityTimeDeviceLock', 'integer'),
         'devicelock_devicepasswordenabled': ('DevicePasswordEnabled', 'choice'),
         'devicelock_alphanumericdevicepasswordrequired': ('AlphanumericPasswordRequired', 'choice'),
-        # Account Policies (LocalPoliciesSecurityOptions CSP)
-        'localpoliciessecurityoptions_accounts_minimumpasswordlength': ('MinimumPasswordLength', 'integer'),
-        'localpoliciessecurityoptions_accounts_passwordhistorysize': ('PasswordHistorySize', 'integer'),
-        'localpoliciessecurityoptions_accounts_passwordcomplexity': ('PasswordComplexity', 'choice'),
-        'localpoliciessecurityoptions_accounts_lockoutbadcount': ('LockoutBadCount', 'integer'),
-        'localpoliciessecurityoptions_accounts_maximumpasswordage': ('MaximumPasswordAge', 'integer'),
-        'localpoliciessecurityoptions_accounts_minimumpasswordage': ('MinimumPasswordAge', 'integer'),
-        'localpoliciessecurityoptions_accounts_cleartextpassword': ('ClearTextPassword', 'choice'),
+        # LocalPoliciesSecurityOptions CSP — inactivity lock (different
+        # control from DeviceLock/MaxInactivityTimeDeviceLock — this one
+        # is in seconds, the DeviceLock one is in minutes):
+        'localpoliciessecurityoptions_interactivelogon_machineinactivitylimit': ('InteractiveLogon_MachineInactivityLimit', 'integer'),
     }
 
     # CMMC control mappings for Settings Catalog settings — used by the
@@ -930,12 +948,16 @@ class CloudPolicyCollector(CollectorBase):
     _SETTINGS_CATALOG_CMMC_CONTROLS = {
         'MinimumPasswordLength': 'IA.L2-3.5.7',
         'PasswordHistorySize': 'IA.L2-3.5.8',
+        'PasswordComplexity': 'IA.L2-3.5.7',
         'LockoutBadCount': 'AC.L2-3.1.8',
         'MaxInactivityTimeDeviceLock': 'AC.L2-3.1.10',
-        'PasswordComplexity': 'IA.L2-3.5.7',
+        'ClearTextPassword': 'IA.L2-3.5.7',
+        'MaximumPasswordAge': 'IA.L2-3.5.7',
+        'MinimumPasswordAge': 'IA.L2-3.5.8',
+        'AllowAdministratorLockout': 'AC.L2-3.1.8',
         'DevicePasswordEnabled': 'IA.L2-3.5.7',
         'AlphanumericPasswordRequired': 'IA.L2-3.5.7',
-        'ClearTextPassword': 'IA.L2-3.5.7',
+        'InteractiveLogon_MachineInactivityLimit': 'AC.L2-3.1.10',
     }
 
     def _collect_settings_catalog_policies(self) -> List[Policy]:
