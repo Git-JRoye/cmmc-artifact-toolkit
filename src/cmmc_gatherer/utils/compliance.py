@@ -320,15 +320,24 @@ class ComplianceScorer:
 
     # -- event logging dimension ------------------------------------------------
 
+    # Sources that are NOT operational security events — they're separate
+    # evidence categories that happen to share the SecurityEvent model. If
+    # they were counted in the Critical/Error ratio, they'd drag the
+    # event_logging score down for reasons that have nothing to do with
+    # the health of the tenant's security logging.
+    _EVENT_LOGGING_EXCLUDED_SOURCES = ('MDE Threat & Vulnerability Management',)
+
     @classmethod
     def _score_event_logging(cls, artifacts: ArtifactCollection) -> Optional[int]:
         # No events could mean "logging works and nothing bad happened" or
         # "logging is broken" — we can't tell from the artifact alone, so we
         # deliberately return None (not 0, not 100) rather than guess.
-        if not artifacts.security_events:
+        scoreable = [e for e in artifacts.security_events
+                     if e.source not in cls._EVENT_LOGGING_EXCLUDED_SOURCES]
+        if not scoreable:
             return None
-        critical = sum(1 for e in artifacts.security_events if e.level in ('Critical', 'Error'))
-        ratio = critical / len(artifacts.security_events)
+        critical = sum(1 for e in scoreable if e.level in ('Critical', 'Error'))
+        ratio = critical / len(scoreable)
         return int(max(0, 100 - (ratio * 100)))
 
     # -- AD / identity security dimension ---------------------------------------

@@ -33,6 +33,7 @@ from .collectors.cloud.mde_alert_collector import MdeAlertCollector
 from .collectors.cloud.service_principal_collector import ServicePrincipalCollector
 from .collectors.cloud.intune_rbac_collector import IntuneRbacCollector
 from .collectors.cloud.intune_device_collector import IntuneDeviceCollector
+from .collectors.cloud.mde_vulnerability_collector import MdeVulnerabilityCollector
 from .collectors.onprem.ad_collector import ActiveDirectoryCollector
 from .collectors.onprem.endpoint_collector import EndpointCollector
 from .collectors.onprem.event_log_collector import EventLogCollector
@@ -392,6 +393,19 @@ class TenantOrchestrator:
                 logger.error("[%s] MDE alert/incident collector failed: %s", profile.tenant_key, e)
                 errors.append(f"mde_alerts: {e}")
 
+        # -- MDE Vulnerability Management (TVM) --
+        # Critical & High CVEs from TVM, capped at 25 — enough to prove the
+        # vulnerability management program is active without dumping every CVE.
+        # Requires Vulnerability.Read.All (WindowsDefenderATP). Non-fatal if
+        # the permission isn't granted — not every tenant will have it.
+        events_mde_vulns: List = []
+        if mde_client is not None:
+            try:
+                events_mde_vulns = MdeVulnerabilityCollector(mde_client).collect()
+            except Exception as e:
+                logger.error("[%s] MDE vulnerability collector failed: %s", profile.tenant_key, e)
+                errors.append(f"mde_vulnerabilities: {e}")
+
         ad_objects: List = []
         try:
             ad_objects = EntraIdentityCollector(graph).collect()
@@ -425,10 +439,13 @@ class TenantOrchestrator:
             logger.error("[%s] Cloud policy collector failed: %s", profile.tenant_key, e)
             errors.append(f"cloud_policies: {e}")
 
-        # Merge MDE alerts/incidents into the main events list — they flow
-        # into the same ArtifactCollection.security_events but are displayed
-        # in their own dedicated report section (distinguished by source).
+        # Merge MDE alerts/incidents and vulnerability findings into the main
+        # events list — they flow into ArtifactCollection.security_events but
+        # are displayed in their own dedicated report sections (distinguished
+        # by source: 'Microsoft Defender for Endpoint Alerts' for alerts,
+        # 'MDE Threat & Vulnerability Management' for TVM findings).
         events += events_mde_alerts
+        events += events_mde_vulns
 
         return endpoints, ad_objects, events, policies, errors
 

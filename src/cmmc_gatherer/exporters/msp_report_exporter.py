@@ -111,11 +111,12 @@ logger = logging.getLogger(__name__)
 _CLOUD_POLICY_TYPES = ('Conditional Access', 'Intune Configuration Profile')
 _CLOUD_EVENT_SOURCES = ('Entra Sign-In Logs', 'Entra Directory Audit Logs', 'Microsoft Graph Security Alerts',
                         'Intune Device Sanitization Events', 'Microsoft Defender for Endpoint Alerts',
-                        'MDE Incidents')
+                        'MDE Incidents', 'MDE Threat & Vulnerability Management')
 
 # MDE sources that get their own dedicated report section — excluded from
 # the generic Security Events section to avoid double-display.
-_MDE_EVENT_SOURCES = ('Microsoft Defender for Endpoint Alerts', 'MDE Incidents')
+_MDE_EVENT_SOURCES = ('Microsoft Defender for Endpoint Alerts', 'MDE Incidents',
+                      'MDE Threat & Vulnerability Management')
 
 # Shared stylesheet for both the main report and the standalone software
 # inventory page, so a visual change (or the "make it look more
@@ -816,6 +817,7 @@ class MSPReportExporter(ExporterBase):
 
         html += self._generate_software_summary_link_html(artifacts, present_evidence, software_href)
         html += self._generate_mde_alerts_html(artifacts, present_evidence)
+        html += self._generate_mde_vulnerabilities_html(artifacts, present_evidence)
         html += self._generate_security_events_html(artifacts, present_evidence)
 
         scope_items = []
@@ -825,8 +827,10 @@ class MSPReportExporter(ExporterBase):
             scope_items.append("Windows security event logging and monitoring")
         if any(e.source in _CLOUD_EVENT_SOURCES and e.source not in _MDE_EVENT_SOURCES for e in artifacts.security_events):
             scope_items.append("Entra sign-in and directory audit log review")
-        if any(e.source in _MDE_EVENT_SOURCES for e in artifacts.security_events):
+        if any(e.source in _MDE_EVENT_SOURCES and e.source != 'MDE Threat & Vulnerability Management' for e in artifacts.security_events):
             scope_items.append("Microsoft Defender for Endpoint alert and incident lifecycle review")
+        if any(e.source == 'MDE Threat & Vulnerability Management' for e in artifacts.security_events):
+            scope_items.append("Microsoft Defender for Endpoint Threat & Vulnerability Management program review")
         if any(p.policy_type == 'Local Security Policy' for p in artifacts.policies):
             scope_items.append("Local security and account lockout policy")
         if any(p.policy_type == 'Group Policy' for p in artifacts.policies):
@@ -906,6 +910,7 @@ class MSPReportExporter(ExporterBase):
         'mde_unauthorized_use_detection': 'sec-mde-alerts',
         'mde_incident_handling': 'sec-mde-alerts',
         'mde_incident_reporting': 'sec-mde-alerts',
+        'mde_vulnerability_findings': 'sec-mde-vulnerabilities',
         'auth_method_detail': 'sec-ad-users',
         'intune_rbac_assignment': 'sec-intune-rbac',
         'app_protection_policy': 'sec-policy-compliance',
@@ -1029,6 +1034,10 @@ class MSPReportExporter(ExporterBase):
             present.append('mde_incident_handling')
         if has_mde_incidents:
             present.append('mde_incident_reporting')
+
+        # MDE TVM — vulnerability management program evidence
+        if any(e.source == 'MDE Threat & Vulnerability Management' for e in artifacts.security_events):
+            present.append('mde_vulnerability_findings')
 
         return present
 
@@ -2094,6 +2103,96 @@ class MSPReportExporter(ExporterBase):
             html += "            </table>\n"
 
         html += "        </div>\n"
+        return html
+
+    def _generate_mde_vulnerabilities_html(self, artifacts: Any, present_evidence: List[str]) -> str:
+        """Dedicated MDE TVM vulnerability section — shows the top Critical &
+        High CVEs tracked by MDE's Threat & Vulnerability Management module.
+
+        This is EVIDENCE that the organization has an active vulnerability
+        management program (RA.L2-3.11.2), not a remediation plan. The table
+        shows what MDE is tracking — the assessor sees that continuous
+        vulnerability scanning is operational and results are actionable.
+        """
+        tvm_events = [e for e in artifacts.security_events
+                      if e.source == 'MDE Threat & Vulnerability Management']
+        if not tvm_events:
+            return ""
+
+        # Count by severity for the header summary
+        critical_count = sum(1 for e in tvm_events if e.event_data.get('severity') == 'Critical')
+        high_count = sum(1 for e in tvm_events if e.event_data.get('severity') == 'High')
+        total_exposed = max(
+            (e.event_data.get('exposed_machines', 0) for e in tvm_events), default=0
+        )
+        has_exploits = any(e.event_data.get('public_exploit') for e in tvm_events)
+
+        exploit_note = (' <span class="status-bad">Public exploits exist for some findings.</span>'
+                        if has_exploits else '')
+
+        html = f"""
+        <div class="section" id="sec-mde-vulnerabilities">
+            <h2>Vulnerability Management (MDE TVM)</h2>
+
+            <p>Microsoft Defender for Endpoint Threat &amp; Vulnerability Management
+            continuously scans onboarded devices for known software vulnerabilities.
+            The {len(tvm_events)} finding(s) below represent the top Critical and High
+            severity CVEs currently tracked in this environment
+            ({critical_count} Critical, {high_count} High).{exploit_note}</p>
+
+            <p class="evidence-note"><strong>CMMC Evidence:</strong> This section demonstrates an
+            active, continuous vulnerability scanning program (RA.L2-3.11.2) and supports
+            flaw identification (SI.L1-3.14.1). Vulnerability remediation tracking
+            is a separate process.</p>
+
+            <table>
+                <tr>
+                    <th>CVE ID</th>
+                    <th>Severity</th>
+                    <th>CVSS v3</th>
+                    <th>Affected Devices</th>
+                    <th>Public Exploit</th>
+                    <th>Status</th>
+                    <th>First Detected</th>
+                </tr>
+"""
+        for e in tvm_events:
+            d = e.event_data
+            sev = d.get('severity', 'Unknown')
+            sev_class = 'status-bad' if sev == 'Critical' else ('status-warn' if sev == 'High' else '')
+            cvss = d.get('cvss_v3')
+            cvss_str = f"{cvss:.1f}" if cvss else "—"
+            exposed = d.get('exposed_machines', 0)
+            pub_exploit = d.get('public_exploit', False)
+            exploit_str = '<span class="status-bad">Yes</span>' if pub_exploit else 'No'
+            status_raw = d.get('status', '')
+            # Make the status human-readable
+            status_map = {
+                'RemediationRequired': 'Remediation Required',
+                'NoActionRequired': 'No Action Required',
+                'UnderException': 'Under Exception',
+                'PartialException': 'Partial Exception',
+            }
+            status_display = status_map.get(status_raw, status_raw or '—')
+            first_detected = d.get('first_detected', '') or d.get('published_on', '') or '—'
+            if first_detected and first_detected != '—' and 'T' in first_detected:
+                first_detected = first_detected.split('T')[0]
+
+            html += (
+                f'                <tr>'
+                f'<td><strong>{d.get("cve_id", "—")}</strong></td>'
+                f'<td><span class="{sev_class}">{sev}</span></td>'
+                f'<td>{cvss_str}</td>'
+                f'<td>{exposed}</td>'
+                f'<td>{exploit_str}</td>'
+                f'<td>{status_display}</td>'
+                f'<td>{first_detected}</td>'
+                f'</tr>\n'
+            )
+
+        html += """            </table>
+        </div>
+"""
         return html
 
     def _generate_security_events_html(self, artifacts: Any, present_evidence: List[str]) -> str:
