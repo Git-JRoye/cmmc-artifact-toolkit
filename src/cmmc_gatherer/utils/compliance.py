@@ -54,7 +54,7 @@ class ComplianceScorer:
     DIMENSION_DESCRIPTIONS = {
         'firewall': "Windows Firewall enabled across all profiles (Domain/Private/Public) on on-prem endpoints, plus real per-device firewall status for Intune-managed cloud devices.",
         'antivirus': "Antivirus / Windows Defender real-time protection active on on-prem endpoints, plus real per-device real-time protection status for Intune-managed cloud devices.",
-        'updates': "On-prem endpoints have installed patch/hotfix history recorded (presence check, not recency). Intune-managed environments are scored on Windows Update Ring policy configuration — quality-update deferral window (≤7 days) and automatic installation mode.",
+        'updates': "Patch management coverage. Cloud/Intune-managed environments are scored on Windows Update Ring policy configuration — quality-update deferral window (≤7 days) and automatic installation mode. On-prem endpoints are scored on installed patch/hotfix history (presence check, not recency).",
         'policies': "Local security policy, UAC, audit policy, Conditional Access, and Intune configuration profiles meeting their individual baselines.",
         'event_logging': "Ratio of Critical/Error security events to total events collected (lower ratio scores higher).",
         'ad_security': "AD/Entra accounts that are either disabled or not stale (i.e. actively used and appropriately managed).",
@@ -281,6 +281,11 @@ class ComplianceScorer:
             'MinimumPasswordLength': lambda v: v >= 14,
             'PasswordHistorySize': lambda v: v >= 5,
             'LockoutBadCount': lambda v: 0 < v <= 5,
+            # Session lock after inactivity (AC.L2-3.1.10). Value is in
+            # minutes; must be >0 (actually enforced) and <=15 (reasonable
+            # upper bound — NIST 800-171 says "after a defined period",
+            # 15 minutes is a widely accepted threshold).
+            'MaxInactivityTimeDeviceLock': lambda v: 0 < v <= 15,
         }
         if p.policy_name in thresholds:
             try:

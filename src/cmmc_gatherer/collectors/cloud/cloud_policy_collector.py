@@ -165,6 +165,11 @@ class CloudPolicyCollector(CollectorBase):
             policies += self._collect_endpoint_security_policies()
         except Exception as e:
             logger.error("Intune endpoint security policy collection failed: %s", e)
+        logger.info("  Collecting Intune Settings Catalog policies...")
+        try:
+            policies += self._collect_settings_catalog_policies()
+        except Exception as e:
+            logger.error("Intune Settings Catalog policy collection failed: %s", e)
         logger.info("Cloud policy collection complete: %d record(s)", len(policies))
         return policies
 
@@ -879,3 +884,256 @@ class CloudPolicyCollector(CollectorBase):
             return out
         logger.info("  Intune endpoint security policies parsed: %d record(s)", len(out))
         return out
+
+    # -- Settings Catalog policies (templateFamily=none) ----------------------
+
+    # Maps the TAIL of a settingDefinitionId (lowercased, after the last
+    # recognized CSP-area prefix) to a (policy_name, value_type) pair.
+    # policy_name deliberately reuses the SAME names the on-prem Local
+    # Security Policy collector and the compliance-policy mapper already use
+    # — so the scorer's existing _policy_passes thresholds evaluate them
+    # without any new scoring logic.
+    #
+    # value_type controls how the raw Graph value is extracted:
+    #   'integer' → simpleSettingValue.value (int)
+    #   'choice'  → choiceSettingValue.value (string, typically ends with
+    #               _0 or _1 for boolean-style choices)
+    #
+    # HONEST CONFIDENCE NOTE: the exact settingDefinitionId strings below
+    # are recalled with moderate confidence — they follow the documented
+    # pattern (device_vendor_msft_policy_config_<csp>_<setting>) but have
+    # NOT been independently verified against a live tenant's
+    # configurationPolicies/{id}/settings response. If the real IDs differ,
+    # the unrecognized settings are logged (not silently dropped) so the
+    # correct IDs can be added from real output.
+    _SETTINGS_CATALOG_KNOWN_SETTINGS = {
+        # DeviceLock CSP
+        'devicelock_mindevicepasswordlength': ('MinimumPasswordLength', 'integer'),
+        'devicelock_devicepasswordhistory': ('PasswordHistorySize', 'integer'),
+        'devicelock_maxdevicepasswordfailedattempts': ('LockoutBadCount', 'integer'),
+        'devicelock_maxinactivitytimedevicelock': ('MaxInactivityTimeDeviceLock', 'integer'),
+        'devicelock_devicepasswordenabled': ('DevicePasswordEnabled', 'choice'),
+        'devicelock_alphanumericdevicepasswordrequired': ('AlphanumericPasswordRequired', 'choice'),
+        # Account Policies (LocalPoliciesSecurityOptions CSP)
+        'localpoliciessecurityoptions_accounts_minimumpasswordlength': ('MinimumPasswordLength', 'integer'),
+        'localpoliciessecurityoptions_accounts_passwordhistorysize': ('PasswordHistorySize', 'integer'),
+        'localpoliciessecurityoptions_accounts_passwordcomplexity': ('PasswordComplexity', 'choice'),
+        'localpoliciessecurityoptions_accounts_lockoutbadcount': ('LockoutBadCount', 'integer'),
+        'localpoliciessecurityoptions_accounts_maximumpasswordage': ('MaximumPasswordAge', 'integer'),
+        'localpoliciessecurityoptions_accounts_minimumpasswordage': ('MinimumPasswordAge', 'integer'),
+        'localpoliciessecurityoptions_accounts_cleartextpassword': ('ClearTextPassword', 'choice'),
+    }
+
+    # CMMC control mappings for Settings Catalog settings — used by the
+    # report exporter's control-badge logic. Same format as the compliance
+    # policy mapper's implicit mappings.
+    _SETTINGS_CATALOG_CMMC_CONTROLS = {
+        'MinimumPasswordLength': 'IA.L2-3.5.7',
+        'PasswordHistorySize': 'IA.L2-3.5.8',
+        'LockoutBadCount': 'AC.L2-3.1.8',
+        'MaxInactivityTimeDeviceLock': 'AC.L2-3.1.10',
+        'PasswordComplexity': 'IA.L2-3.5.7',
+        'DevicePasswordEnabled': 'IA.L2-3.5.7',
+        'AlphanumericPasswordRequired': 'IA.L2-3.5.7',
+        'ClearTextPassword': 'IA.L2-3.5.7',
+    }
+
+    def _collect_settings_catalog_policies(self) -> List[Policy]:
+        """Parse Settings Catalog configuration profiles (templateFamily=none)
+        that the Endpoint Security collector deliberately skips. These are
+        the profiles created via the Intune admin center's "Settings catalog"
+        picker — they use the same configurationPolicies Graph resource as
+        Endpoint Security policies but with templateFamily=none instead of
+        an endpointSecurity* family value.
+
+        For each Settings Catalog policy, fetches the individual settings
+        via configurationPolicies/{id}/settings and maps recognized
+        settingDefinitionId values into Policy objects using the same
+        policy_name strings the scorer already knows (MinimumPasswordLength,
+        PasswordHistorySize, LockoutBadCount, etc.).
+
+        This is NOT a full Settings Catalog parser — it only extracts
+        settings with known, CMMC-relevant settingDefinitionIds. Unrecognized
+        settings are logged at DEBUG level for diagnostic visibility but
+        do not produce Policy records. This is the same "explicit about what
+        we know, honest about what we don't" discipline used throughout this
+        collector.
+        """
+        out: List[Policy] = []
+        try:
+            for p in self._beta_graph.get_all("deviceManagement/configurationPolicies"):
+                template_label = self._endpoint_security_template_label(p)
+                if template_label is not None:
+                    continue  # Already handled by _collect_endpoint_security_policies
+
+                policy_id = p.get("id")
+                if not policy_id:
+                    continue
+
+                name = p.get("name") or p.get("displayName") or "Unnamed Settings Catalog Policy"
+
+                # Check assignment status — same logic as endpoint security
+                is_assigned = p.get("isAssigned")
+                if is_assigned is None:
+                    try:
+                        assignments = list(self._beta_graph.get_all(
+                            f"deviceManagement/configurationPolicies/{policy_id}/assignments"
+                        ))
+                        is_assigned = len(assignments) > 0
+                    except Exception:
+                        pass
+
+                if not is_assigned:
+                    logger.info("  Settings Catalog policy '%s' is not assigned — skipping setting-level parse", name)
+                    continue
+
+                # Fetch individual settings for this policy
+                try:
+                    settings = list(self._beta_graph.get_all(
+                        f"deviceManagement/configurationPolicies/{policy_id}/settings"
+                    ))
+                except Exception as e:
+                    logger.warning("  Could not fetch settings for Settings Catalog policy '%s': %s", name, e)
+                    continue
+
+                parsed = self._map_settings_catalog_settings(settings, name, p.get("lastModifiedDateTime"))
+                out.extend(parsed)
+                logger.info("  Settings Catalog policy '%s': %d recognized setting(s) of %d total",
+                            name, len(parsed), len(settings))
+
+        except Exception as e:
+            detail = getattr(getattr(e, "response", None), "text", None)
+            if detail:
+                logger.error("Settings Catalog policy collection failed: %s | Response: %s", e, detail[:500])
+            else:
+                logger.error("Settings Catalog policy collection failed: %s", e)
+            return out
+        logger.info("  Intune Settings Catalog policies parsed: %d record(s)", len(out))
+        return out
+
+    @classmethod
+    def _map_settings_catalog_settings(cls, settings: list, policy_name: str,
+                                        last_modified: Optional[str]) -> List[Policy]:
+        """Map individual settings from a Settings Catalog policy into
+        Policy records. Each setting's settingDefinitionId is checked
+        against _SETTINGS_CATALOG_KNOWN_SETTINGS — recognized settings
+        produce a Policy record with the correct policy_name for the
+        scorer; unrecognized ones are logged and skipped.
+        """
+        rows: List[Policy] = []
+        target = f"Settings Catalog: {policy_name}"
+
+        for s in settings:
+            instance = s.get("settingInstance") or {}
+            definition_id = (instance.get("settingDefinitionId") or "").lower()
+            if not definition_id:
+                continue
+
+            # Match against known settings by checking if the definition ID
+            # ends with any of the known suffixes. This handles variations
+            # in the prefix (device_vendor_msft_policy_config_ vs other
+            # possible prefixes) while still matching on the meaningful
+            # CSP area + setting name portion.
+            mapping = None
+            for suffix, mapped in cls._SETTINGS_CATALOG_KNOWN_SETTINGS.items():
+                if definition_id.endswith(suffix):
+                    mapping = mapped
+                    break
+
+            if mapping is None:
+                logger.debug("  Unrecognized Settings Catalog setting: %s", definition_id)
+                continue
+
+            policy_name_mapped, value_type = mapping
+
+            # Extract the actual value based on the setting instance type
+            value = cls._extract_settings_catalog_value(instance, value_type)
+            if value is None:
+                logger.debug("  Could not extract value for setting %s (type=%s)",
+                             definition_id, instance.get("@odata.type"))
+                continue
+
+            # Determine status based on value type and content
+            status = cls._settings_catalog_status(policy_name_mapped, value, value_type)
+
+            cmmc_control = cls._SETTINGS_CATALOG_CMMC_CONTROLS.get(policy_name_mapped, '')
+            desc = (f"Settings Catalog setting from '{policy_name}'"
+                    f"{f' ({cmmc_control})' if cmmc_control else ''}")
+
+            rows.append(Policy(
+                policy_name=policy_name_mapped,
+                policy_type="Intune Settings Catalog",
+                status=status,
+                target=target,
+                value=str(value),
+                description=desc,
+                last_applied=last_modified,
+            ))
+
+        return rows
+
+    @staticmethod
+    def _extract_settings_catalog_value(instance: dict, value_type: str) -> Any:
+        """Extract the actual value from a Settings Catalog settingInstance.
+
+        Settings Catalog settings use polymorphic value containers:
+        - simpleSettingValue for integers/strings
+        - choiceSettingValue for enum/boolean selections
+        - groupSettingCollectionValue for grouped settings (not parsed here)
+        """
+        odata_type = instance.get("@odata.type", "")
+
+        if "SimpleSettingInstance" in odata_type or value_type == 'integer':
+            simple_val = instance.get("simpleSettingValue") or {}
+            val = simple_val.get("value")
+            if val is not None:
+                try:
+                    return int(val)
+                except (TypeError, ValueError):
+                    return val
+
+        if "ChoiceSettingInstance" in odata_type or value_type == 'choice':
+            choice_val = instance.get("choiceSettingValue") or {}
+            val = choice_val.get("value", "")
+            return val
+
+        # Fallback: try both containers
+        for container_key in ("simpleSettingValue", "choiceSettingValue"):
+            container = instance.get(container_key)
+            if container and "value" in container:
+                return container["value"]
+
+        return None
+
+    @staticmethod
+    def _settings_catalog_status(policy_name: str, value: Any, value_type: str) -> str:
+        """Determine the status string for a Settings Catalog setting.
+
+        For numeric settings (integer), status is "Configured" — the
+        scorer's _policy_passes thresholds handle the actual pass/fail
+        evaluation based on the numeric value.
+
+        For choice settings (boolean-style), the value typically ends with
+        _1 (enabled) or _0 (disabled). Map those to Enabled/Disabled so
+        the scorer's generic fallback rule handles them correctly.
+        """
+        if value_type == 'integer':
+            # Numeric settings are evaluated by the scorer's thresholds,
+            # not by status string — use "Configured" to signal that a
+            # value is present without pre-judging pass/fail here.
+            return "Configured"
+
+        if value_type == 'choice':
+            val_str = str(value).lower()
+            # Choice values in the Settings Catalog typically end with
+            # _1 for "enabled/required" and _0 for "disabled/not required".
+            # Also handle plain "enabled"/"disabled" strings.
+            if val_str.endswith("_1") or "enabled" in val_str or "required" in val_str:
+                return "Enabled"
+            if val_str.endswith("_0") or "disabled" in val_str or "notconfigured" in val_str:
+                return "Disabled"
+            # Unrecognized choice value — log and mark as Configured
+            # (not scored) rather than guessing
+            return "Configured"
+
+        return "Configured"
