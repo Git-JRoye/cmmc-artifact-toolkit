@@ -2181,11 +2181,15 @@ class MSPReportExporter(ExporterBase):
                 </table>
             </div>
 """
-        # Render a sample table for each severity group that has events
+        # Render a sample table for each severity group that has events.
+        # Samples are distributed across sources (round-robin) so every
+        # log source gets representation — e.g. if Information events come
+        # from both Entra Sign-In Logs and Entra Directory Audit Logs, the
+        # sample table shows both, not just the 5 most recent from one.
         for group_name, group_events in severity_groups.items():
             if not group_events:
                 continue
-            shown = group_events[:SAMPLE_PER_GROUP]
+            shown = self._diverse_sample(group_events, SAMPLE_PER_GROUP)
             count_note = f" ({len(shown)} of {len(group_events)})" if len(group_events) > SAMPLE_PER_GROUP else f" ({len(group_events)})"
             html += f"""            <h3>{group_name} Events{count_note}</h3>
             <table>
@@ -2196,6 +2200,42 @@ class MSPReportExporter(ExporterBase):
 
         html += "        </div>\n"
         return html
+
+    @staticmethod
+    def _diverse_sample(events: list, n: int) -> list:
+        """Pick up to *n* events distributed across sources (round-robin).
+
+        Guarantees every distinct ``source`` value present in *events* gets
+        at least one representative (when n >= number of sources), so the
+        evidence table proves collection breadth — not just depth from the
+        single most-active source. Within each source, the most recent
+        events are chosen (events are assumed sorted newest-first).
+        """
+        if len(events) <= n:
+            return events
+
+        by_source: dict[str, list] = {}
+        for e in events:
+            by_source.setdefault(e.source, []).append(e)
+
+        selected: list = []
+        # Round-robin: one event per source per pass until we hit n
+        iterators = {src: iter(evts) for src, evts in by_source.items()}
+        while len(selected) < n and iterators:
+            exhausted: list[str] = []
+            for src in list(iterators):
+                if len(selected) >= n:
+                    break
+                try:
+                    selected.append(next(iterators[src]))
+                except StopIteration:
+                    exhausted.append(src)
+            for src in exhausted:
+                del iterators[src]
+
+        # Sort the final sample by timestamp descending for display
+        selected.sort(key=lambda e: e.timestamp or '', reverse=True)
+        return selected
 
     @staticmethod
     def _intune_signal(ep: Any) -> Dict[str, Any]:
