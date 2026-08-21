@@ -2106,8 +2106,8 @@ class MSPReportExporter(ExporterBase):
         return html
 
     def _generate_mde_vulnerabilities_html(self, artifacts: Any, present_evidence: List[str]) -> str:
-        """Dedicated MDE TVM vulnerability section — shows the top Critical &
-        High CVEs tracked by MDE's Threat & Vulnerability Management module.
+        """Dedicated MDE TVM vulnerability section — shows a representative
+        sample of CVEs across all severity levels tracked by MDE's TVM module.
 
         This is EVIDENCE that the organization has an active vulnerability
         management program (RA.L2-3.11.2), not a remediation plan. The table
@@ -2120,8 +2120,10 @@ class MSPReportExporter(ExporterBase):
             return ""
 
         # Count by severity for the header summary
-        critical_count = sum(1 for e in tvm_events if e.event_data.get('severity') == 'Critical')
-        high_count = sum(1 for e in tvm_events if e.event_data.get('severity') == 'High')
+        sev_counts: dict = {}
+        for e in tvm_events:
+            s = e.event_data.get('severity', 'Unknown')
+            sev_counts[s] = sev_counts.get(s, 0) + 1
         total_exposed = max(
             (e.event_data.get('exposed_machines', 0) for e in tvm_events), default=0
         )
@@ -2130,15 +2132,20 @@ class MSPReportExporter(ExporterBase):
         exploit_note = (' <span class="status-bad">Public exploits exist for some findings.</span>'
                         if has_exploits else '')
 
+        # Build a severity breakdown string, e.g. "5 Critical, 5 High, 5 Medium, 3 Low"
+        sev_order = ['Critical', 'High', 'Medium', 'Low']
+        sev_parts = [f"{sev_counts[s]} {s}" for s in sev_order if sev_counts.get(s)]
+        sev_summary = ", ".join(sev_parts) if sev_parts else "0 findings"
+
         html = f"""
         <div class="section" id="sec-mde-vulnerabilities">
             <h2>Vulnerability Management (MDE TVM)</h2>
 
             <p>Microsoft Defender for Endpoint Threat &amp; Vulnerability Management
             continuously scans onboarded devices for known software vulnerabilities.
-            The {len(tvm_events)} finding(s) below represent the top Critical and High
-            severity CVEs currently tracked in this environment
-            ({critical_count} Critical, {high_count} High).{exploit_note}</p>
+            The {len(tvm_events)} finding(s) below are a representative sample across
+            severity levels currently tracked in this environment
+            ({sev_summary}).{exploit_note}</p>
 
             <p class="evidence-note"><strong>CMMC Evidence:</strong> This section demonstrates an
             active, continuous vulnerability scanning program (RA.L2-3.11.2) and supports
@@ -2159,7 +2166,10 @@ class MSPReportExporter(ExporterBase):
         for e in tvm_events:
             d = e.event_data
             sev = d.get('severity', 'Unknown')
-            sev_class = 'status-bad' if sev == 'Critical' else ('status-warn' if sev == 'High' else '')
+            sev_class = ('status-bad' if sev == 'Critical'
+                         else 'status-warn' if sev == 'High'
+                         else 'status-info' if sev == 'Medium'
+                         else '')
             cvss = d.get('cvss_v3')
             cvss_str = f"{cvss:.1f}" if cvss else "—"
             exposed = d.get('exposed_machines', 0)
