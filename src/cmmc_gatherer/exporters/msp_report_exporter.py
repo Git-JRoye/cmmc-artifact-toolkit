@@ -2157,10 +2157,12 @@ class MSPReportExporter(ExporterBase):
                     <th>CVE ID</th>
                     <th>Severity</th>
                     <th>CVSS v3</th>
+                    <th>Affected Software</th>
                     <th>Affected Devices</th>
                     <th>Public Exploit</th>
                     <th>Status</th>
                     <th>First Detected</th>
+                    <th>Updated On</th>
                 </tr>
 """
         for e in tvm_events:
@@ -2184,19 +2186,34 @@ class MSPReportExporter(ExporterBase):
                 'PartialException': 'Partial Exception',
             }
             status_display = status_map.get(status_raw, status_raw or '—')
+
+            # Affected software — truncate long lists for readability
+            affected_sw = d.get('affected_software', '') or '—'
+            if len(affected_sw) > 60:
+                # Show first product + count of others
+                parts = [p.strip() for p in affected_sw.split(',')]
+                if len(parts) > 1:
+                    affected_sw = f"{parts[0]} (+{len(parts) - 1} more)"
+
             first_detected = d.get('first_detected', '') or d.get('published_on', '') or '—'
             if first_detected and first_detected != '—' and 'T' in first_detected:
                 first_detected = first_detected.split('T')[0]
+
+            updated_on = d.get('updated_on', '') or '—'
+            if updated_on and updated_on != '—' and 'T' in updated_on:
+                updated_on = updated_on.split('T')[0]
 
             html += (
                 f'                <tr>'
                 f'<td><strong>{d.get("cve_id", "—")}</strong></td>'
                 f'<td><span class="{sev_class}">{sev}</span></td>'
                 f'<td>{cvss_str}</td>'
+                f'<td>{affected_sw}</td>'
                 f'<td>{exposed}</td>'
                 f'<td>{exploit_str}</td>'
                 f'<td>{status_display}</td>'
                 f'<td>{first_detected}</td>'
+                f'<td>{updated_on}</td>'
                 f'</tr>\n'
             )
 
